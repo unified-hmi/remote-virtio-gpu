@@ -1,0 +1,1 @@
+SUBSYSTEM=="drm", DEVPATH=="/devices/virtio-lo-bus/*", TAG+="seat", TAG+="master-of-seat", ENV{ID_SEAT}="seat_virtual"

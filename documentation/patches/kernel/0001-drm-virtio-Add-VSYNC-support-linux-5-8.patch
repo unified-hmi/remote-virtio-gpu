@@ -1,0 +1,236 @@
+From 5e1e82011f3e6e2ed667d5e0348786f1a8b48d4f Mon Sep 17 00:00:00 2001
+From: Ihor Korynkevych <ihor.korynkevych@opensynergy.com>
+Date: Thu, 24 Jun 2021 16:32:54 -0400
+Subject: [PATCH] Add vsync support to virtio-gpu driver.
+
+---
+ drivers/gpu/drm/virtio/virtgpu_display.c |  2 +-
+ drivers/gpu/drm/virtio/virtgpu_drv.c     |  1 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h     |  9 ++++--
+ drivers/gpu/drm/virtio/virtgpu_kms.c     |  6 ++++
+ drivers/gpu/drm/virtio/virtgpu_plane.c   | 26 ++++++++++++----
+ drivers/gpu/drm/virtio/virtgpu_vq.c      | 38 ++++++++++++++++++++++--
+ include/uapi/linux/virtio_gpu.h          |  2 ++
+ 7 files changed, 72 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/virtgpu_display.c
+index cc7fd957a307..3c02039cd18f 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_display.c
++++ b/drivers/gpu/drm/virtio/virtgpu_display.c
+@@ -325,7 +325,7 @@ static void vgdev_atomic_commit_tail(struct drm_atomic_state *state)
+ 	drm_atomic_helper_fake_vblank(state);
+ 	drm_atomic_helper_commit_hw_done(state);
+ 
+-	drm_atomic_helper_wait_for_vblanks(dev, state);
++	drm_atomic_helper_wait_for_flip_done(dev, state);
+ 	drm_atomic_helper_cleanup_planes(dev, state);
+ }
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index ab4bed78e656..6de5315655b2 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -165,6 +165,7 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_VIRGL,
+ #endif
+ 	VIRTIO_GPU_F_EDID,
++	VIRTIO_GPU_F_VSYNC,
+ };
+ static struct virtio_driver virtio_gpu_driver = {
+ 	.feature_table = features,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 9ff9f4ac0522..a045e231a08f 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -34,6 +34,7 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_encoder.h>
++#include <drm/drm_vblank.h>
+ #include <drm/drm_fb_helper.h>
+ #include <drm/drm_gem.h>
+ #include <drm/drm_gem_shmem_helper.h>
+@@ -130,6 +131,7 @@ struct virtio_gpu_vbuffer {
+ struct virtio_gpu_output {
+ 	int index;
+ 	struct drm_crtc crtc;
++	struct drm_pending_vblank_event *event;
+ 	struct drm_connector conn;
+ 	struct drm_encoder enc;
+ 	struct virtio_gpu_display_one info;
+@@ -200,6 +202,7 @@ struct virtio_gpu_device {
+ 	bool has_virgl_3d;
+ 	bool has_edid;
+ 	bool has_indirect;
++	bool has_vsync;
+ 
+ 	struct work_struct config_changed_work;
+ 
+@@ -273,9 +276,9 @@ void virtio_gpu_cmd_transfer_to_host_2d(struct virtio_gpu_device *vgdev,
+ 					struct virtio_gpu_object_array *objs,
+ 					struct virtio_gpu_fence *fence);
+ void virtio_gpu_cmd_resource_flush(struct virtio_gpu_device *vgdev,
+-				   uint32_t resource_id,
+-				   uint32_t x, uint32_t y,
+-				   uint32_t width, uint32_t height);
++				   uint32_t scanout_id, uint32_t resource_id,
++				   uint32_t x, uint32_t y, uint32_t width,
++				   uint32_t height);
+ void virtio_gpu_cmd_set_scanout(struct virtio_gpu_device *vgdev,
+ 				uint32_t scanout_id, uint32_t resource_id,
+ 				uint32_t width, uint32_t height,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 0a5c8cf409fb..bbe333107a40 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -151,6 +151,12 @@ int virtio_gpu_init(struct drm_device *dev)
+ 		 vgdev->has_virgl_3d ? '+' : '-',
+ 		 vgdev->has_edid     ? '+' : '-');
+ 
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_VSYNC)) {
++		vgdev->has_vsync = true;
++	}
++	DRM_INFO("vsync %s\n",
++		 vgdev->has_vsync ? "enabled" : "not supported by host");
++
+ 	ret = virtio_find_vqs(vgdev->vdev, 2, vqs, callbacks, names, NULL);
+ 	if (ret) {
+ 		DRM_ERROR("failed to find virt queues\n");
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index 52d24179bcec..b5f2d1534d18 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -134,6 +134,8 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 	struct virtio_gpu_output *output = NULL;
+ 	struct virtio_gpu_object *bo;
+ 	struct drm_rect rect;
++	struct drm_crtc *crtc;
++	unsigned long flags;
+ 
+ 	if (plane->state->crtc)
+ 		output = drm_crtc_to_virtio_gpu_output(plane->state->crtc);
+@@ -180,11 +182,25 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 					   plane->state->src_y >> 16);
+ 	}
+ 
+-	virtio_gpu_cmd_resource_flush(vgdev, bo->hw_res_handle,
+-				      rect.x1,
+-				      rect.y1,
+-				      rect.x2 - rect.x1,
+-				      rect.y2 - rect.y1);
++	if (bo->hw_res_handle) {
++		crtc = &output->crtc;
++
++		if (vgdev->has_vsync && crtc->state->event) {
++			if (output->event)
++				DRM_ERROR("pending event from previous vsync");
++
++			spin_lock_irqsave(&crtc->dev->event_lock, flags);
++			output->event = crtc->state->event;
++			crtc->state->event = NULL;
++			spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
++		}
++
++		virtio_gpu_cmd_resource_flush(vgdev, output->index, bo->hw_res_handle,
++						rect.x1,
++						rect.y1,
++						rect.x2 - rect.x1,
++						rect.y2 - rect.y1);
++	}
+ 	virtio_gpu_notify(vgdev);
+ }
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index 9e663a5d9952..2ab50235ff80 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -205,7 +205,11 @@ void virtio_gpu_dequeue_ctrl_func(struct work_struct *work)
+ 	struct list_head reclaim_list;
+ 	struct virtio_gpu_vbuffer *entry, *tmp;
+ 	struct virtio_gpu_ctrl_hdr *resp;
++	struct drm_crtc *crtc;
++	struct drm_pending_vblank_event *event;
++	unsigned long flags;
+ 	u64 fence_id = 0;
++	u32 scanout_id = 0;
+ 
+ 	INIT_LIST_HEAD(&reclaim_list);
+ 	spin_lock(&vgdev->ctrlq.qlock);
+@@ -241,6 +245,27 @@ void virtio_gpu_dequeue_ctrl_func(struct work_struct *work)
+ 				fence_id = f;
+ 			}
+ 		}
++		if (resp->flags & cpu_to_le32(VIRTIO_GPU_FLAG_VSYNC)) {
++			/*
++			 * Get the scanout_id value from the padding bytes.
++			 */
++			scanout_id = le32_to_cpu(resp->padding);
++
++			if (vgdev->outputs[scanout_id].event) {
++				crtc = &vgdev->outputs[scanout_id].crtc;
++
++				spin_lock_irqsave(&crtc->dev->event_lock,
++						  flags);
++				event = vgdev->outputs[scanout_id].event;
++				vgdev->outputs[scanout_id].event = NULL;
++				drm_crtc_send_vblank_event(crtc, event);
++				spin_unlock_irqrestore(&crtc->dev->event_lock,
++						       flags);
++			} else {
++				DRM_ERROR("Missing vsync event for scanout %d",
++					  scanout_id);
++			}
++		}
+ 		if (entry->resp_cb)
+ 			entry->resp_cb(vgdev, entry);
+ 	}
+@@ -569,9 +594,9 @@ void virtio_gpu_cmd_set_scanout(struct virtio_gpu_device *vgdev,
+ }
+ 
+ void virtio_gpu_cmd_resource_flush(struct virtio_gpu_device *vgdev,
+-				   uint32_t resource_id,
+-				   uint32_t x, uint32_t y,
+-				   uint32_t width, uint32_t height)
++				   uint32_t scanout_id, uint32_t resource_id,
++				   uint32_t x, uint32_t y, uint32_t width,
++				   uint32_t height)
+ {
+ 	struct virtio_gpu_resource_flush *cmd_p;
+ 	struct virtio_gpu_vbuffer *vbuf;
+@@ -580,6 +605,13 @@ void virtio_gpu_cmd_resource_flush(struct virtio_gpu_device *vgdev,
+ 	memset(cmd_p, 0, sizeof(*cmd_p));
+ 
+ 	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
++	if (vgdev->has_vsync) {
++		cmd_p->hdr.flags |= cpu_to_le32(VIRTIO_GPU_FLAG_VSYNC);
++		/*
++		 * Use padding bytes to store the scanout_id value.
++		 */
++		cmd_p->hdr.padding = cpu_to_le32(scanout_id);
++	}
+ 	cmd_p->resource_id = cpu_to_le32(resource_id);
+ 	cmd_p->r.width = cpu_to_le32(width);
+ 	cmd_p->r.height = cpu_to_le32(height);
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index 0c85914d9369..7724ad27eb75 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -50,6 +50,7 @@
+  * VIRTIO_GPU_CMD_GET_EDID
+  */
+ #define VIRTIO_GPU_F_EDID                1
++#define VIRTIO_GPU_F_VSYNC               5
+ 
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+@@ -98,6 +99,7 @@ enum virtio_gpu_ctrl_type {
+ };
+ 
+ #define VIRTIO_GPU_FLAG_FENCE (1 << 0)
++#define VIRTIO_GPU_FLAG_VSYNC (1 << 2)
+ 
+ struct virtio_gpu_ctrl_hdr {
+ 	__le32 type;
+-- 
+2.17.1
+

@@ -1,0 +1,89 @@
+From 6e23c8970762309d3f2b88f252333b2492aacd28 Mon Sep 17 00:00:00 2001
+From: Andrii Pauk <Andrii.Pauk@opensynergy.com>
+Date: Sat, 27 Feb 2021 17:42:00 +0200
+Subject: [PATCH] glBufferData: Update resource backing memory.
+
+Update buffer backing memory on buffer initialization with data.
+This is workaround for UHMI project, where
+VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D command is not implemented.
+
+The problem is in the following use-case:
+1) glBufferData --- reserves guest memory "backing" for resource,
+but doesn't fill it with data. Instead, data is serialized into
+virgl internal command and sent using VIRTIO_GPU_CMD_SUBMIT_3D
+comand. This command is opaque for rproxy/rvdds and serialized cmd buffer
+is just forwarded to virglrenderer, where it is deserialized and
+used for initialization of internal "gpu" memory with this data.
+2) glMapBuffer --- this calls TRANSFER_FROM_HOST_3D, which asks host/rproxy-->
+rvdds/virglrenderer to update backing memory (on source) with buffer data.
+And further this backing memory is mapped to guest application.
+In case of UHMI, TRANSFER_FROM_HOST_3D is not implemented, thus the memory is
+not "initialized".
+3) Modify buffer memory, but not whole memory, just some chunks.
+4) glUnmapBuffer --- this will trigger VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
+command, which will send to target whole buffer memory and will overwrite
+previous memory. It's ok for modified in step 3 memory, but other is
+just garbage (I always saw zero filled memory).
+
+The above scenario produces artifacts on buffer-scene of glmark, in case of
+"update-method=map", which forces glmark to use 1-4 flow.
+
+As a workaround, fill buffer backing memory with data on step 1.
+
+Issue: EXDCLXXII-420
+---
+ src/gallium/auxiliary/util/u_inlines.h       | 21 +++++++++++++++++++++
+ src/mesa/state_tracker/st_cb_bufferobjects.c |  4 +++-
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/util/u_inlines.h b/src/gallium/auxiliary/util/u_inlines.h
+index dee6f8f..4745f7b 100644
+--- a/src/gallium/auxiliary/util/u_inlines.h
++++ b/src/gallium/auxiliary/util/u_inlines.h
+@@ -462,6 +462,27 @@ pipe_buffer_read(struct pipe_context *pipe,
+    pipe_buffer_unmap(pipe, src_transfer);
+ }
+ 
++static inline void
++pipe_buffer_update_backing(struct pipe_context *pipe,
++                 struct pipe_resource *buf,
++                 unsigned offset,
++                 unsigned size,
++                 void *data)
++{
++   struct pipe_transfer *src_transfer;
++   ubyte *map;
++
++   map = (ubyte *) pipe_buffer_map_range(pipe,
++                                         buf,
++                                         offset, size,
++                                         PIPE_TRANSFER_WRITE,
++                                         &src_transfer);
++   if (!map)
++      return;
++
++   memcpy(map, data, size);
++   pipe_buffer_unmap(pipe, src_transfer);
++}
+ 
+ /**
+  * Map a resource for reading/writing.
+diff --git a/src/mesa/state_tracker/st_cb_bufferobjects.c b/src/mesa/state_tracker/st_cb_bufferobjects.c
+index 5ebe94f..cb33c8c 100644
+--- a/src/mesa/state_tracker/st_cb_bufferobjects.c
++++ b/src/mesa/state_tracker/st_cb_bufferobjects.c
+@@ -343,8 +343,10 @@ bufferobj_data(struct gl_context *ctx,
+       else {
+          st_obj->buffer = screen->resource_create(screen, &buffer);
+ 
+-         if (st_obj->buffer && data)
++         if (st_obj->buffer && data) {
+             pipe_buffer_write(pipe, st_obj->buffer, 0, size, data);
++            pipe_buffer_update_backing(pipe, st_obj->buffer, 0, size, data);
++         }
+       }
+ 
+       if (!st_obj->buffer) {
+-- 
+2.7.4
+
