@@ -14,7 +14,7 @@
 - [Build instructions](#build-instructions)
 - [HowTo run RVGPU locally](#how-to-run-rvgpu-locally)
 - [HowTo run RVGPU remotely](#how-to-run-rvgpu-remotely)
-- [License](#license)
+
 
 ## Repository structure
 
