@@ -84,7 +84,7 @@ following steps:
   sudo apt install llvm libwayland-egl-backend-dev libxcb-glx0-dev libx11-xcb-dev libxcb-dri2-0-dev libxcb-dri3-dev \
                  libxcb-present-dev libxshmfence-dev libgbm-dev \
                  libsdl2-dev libgtk-3-dev libgles2-mesa-dev libpixman-1-dev \
-                 libtool autoconf libdrm-dev python libinput-dev libwayland-egl-backend-dev glmark2-es2-wayland
+                 libtool autoconf libdrm-dev python libinput-dev glmark2-es2-wayland
 
   wget https://archive.mesa3d.org//mesa-18.2.0.tar.xz
   tar -xf mesa-18.2.0.tar.xz
@@ -98,6 +98,8 @@ following steps:
   ```
 
 ## How to run RVGPU locally
+
+To use **remote-virtio-gpu**, you need to load the kernel modules **virtio-gpu** and **virtio_lo**, so turn **Secure Boot** off.
 
 **rvgpu-renderer** creates a Wayland backend to display the stream, rendered by **rvgpu-proxy**. Therefore on login screen, please choose [Wayland](https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-20-04-desktop).
 
