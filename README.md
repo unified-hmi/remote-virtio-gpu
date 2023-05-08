@@ -1,12 +1,21 @@
+
 <picture>
-<img src="documentation/png/logo.png" width=30%>
+<h1 align="center">
+<img src="documentation/png/logo.png" width=60%>
+</h1>
 </picture>
+
+**"Unified HMI" is a common platform technology for UX innovation in integrated cockpit by flexible information display on multiple displays of various applications. Applications can be rendered to any display via a unified virtual display.**
+<picture>
+<p align="center"><img src="documentation/png/cockpit.png" width=90% align="center"></p>
+</picture>
+<br>
 
 # Remote Virtio GPU Device (RVGPU)
 
 **RVGPU is a client-server based rendering engine, which allows to render 3D on one device (client) and display it via network on another device (server)**
 
-![glmark2 running Ubuntu 20.04](documentation/png/glmark2-ubuntu.png)
+<p align="center"><img src="documentation/png/glmark2-ubuntu.png" width=90% align="center"></p>
 
 ## Contents
 
