@@ -44,6 +44,7 @@ static void usage(void)
 	info("\t-a\t\tenable translucent mode on Wayland\n");
 	info("\t-B color\tcolor of initial screen in RGBA format");
 	info("(0xRRGGBBAA, default is 0x%08x)\n", BACKEND_COLOR);
+	info("\t-c capset\tdump capset into file\n");
 	info("\t-s scanout\tdisplay specified scanout\n");
 	info("\t-b box\t\toverride scanout box (format WxH@X,Y)\n");
 	info("\t-i ID\t\tset scanout window ID (for IVI shell)\n");
