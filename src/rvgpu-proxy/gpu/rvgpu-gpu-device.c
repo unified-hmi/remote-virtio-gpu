@@ -710,7 +710,8 @@ static unsigned int gpu_device_attach(struct gpu_device *g, unsigned int resid,
 	res->nbacking = n;
 	for (i = 0u; i < n; i++) {
 		res->backing[i].iov_base = map_guest(g->lo_fd, mem[i].addr,
-						     PROT_READ, mem[i].length);
+						     PROT_READ | PROT_WRITE,
+						     mem[i].length);
 		res->backing[i].iov_len = mem[i].length;
 		sentsize += mem[i].length;
 	}
