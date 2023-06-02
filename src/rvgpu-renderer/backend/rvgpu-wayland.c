@@ -87,17 +87,17 @@ static void registry_add_object(void *data, struct wl_registry *registry,
 	(void)version;
 	struct rvgpu_wl_state *r = data;
 
-	if (!strcmp(interface, "wl_compositor")) {
+	if (!strcmp(interface, wl_compositor_interface.name)) {
 		r->comp = wl_registry_bind(registry, name,
 					   &wl_compositor_interface, 1);
-	} else if (!strcmp(interface, "wl_shell")) {
+	} else if (!strcmp(interface, wl_shell_interface.name)) {
 		r->shell = wl_registry_bind(registry, name, &wl_shell_interface,
 					    1);
-	} else if (!strcmp(interface, "wl_seat")) {
+	} else if (!strcmp(interface, wl_seat_interface.name)) {
 		r->seat =
 			wl_registry_bind(registry, name, &wl_seat_interface, 1);
 		wl_seat_add_listener(r->seat, &seat_listener, r);
-	} else if (!strcmp(interface, "ivi_application")) {
+	} else if (!strcmp(interface, ivi_application_interface.name)) {
 		r->ivi_app = wl_registry_bind(registry, name,
 					      &ivi_application_interface, 1);
 	}
