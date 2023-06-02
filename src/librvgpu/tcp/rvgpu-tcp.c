@@ -48,6 +48,8 @@ struct conninfo {
 	struct addrinfo *servinfo, *p;
 };
 
+static int reconnect_single(struct vgpu_host *host);
+
 int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
 		     struct rvgpu_scanout_arguments *args)
 {
@@ -156,7 +158,7 @@ static void reconnect_next(struct conninfo *ci, struct pollfd *pfd)
 	}
 }
 
-int wait_scanouts_init(struct ctx_priv *ctx)
+static int wait_scanouts_init(struct ctx_priv *ctx)
 {
 	struct timespec end;
 	uint16_t timeo_sec = 10;
@@ -178,7 +180,7 @@ int wait_scanouts_init(struct ctx_priv *ctx)
 	return -1;
 }
 
-void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
+static void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 {
 	struct pollfd pfds[MAX_HOSTS];
 	struct conninfo cinfo[MAX_HOSTS];
@@ -256,7 +258,7 @@ void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 	}
 }
 
-int reconnect_single(struct vgpu_host *host)
+static int reconnect_single(struct vgpu_host *host)
 {
 	struct conninfo cinfo;
 	struct addrinfo hints = {
@@ -309,7 +311,7 @@ int reconnect_single(struct vgpu_host *host)
 	return sockfd;
 }
 
-void close_conn(struct vgpu_host *vhost)
+static void close_conn(struct vgpu_host *vhost)
 {
 	if (vhost->pfd) {
 		if (vhost->pfd->fd > 0) {
@@ -322,7 +324,7 @@ void close_conn(struct vgpu_host *vhost)
 	vhost->state = HOST_DISCONNECTED;
 }
 
-void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
+static void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
 {
 	for (unsigned int i = 0; i < count; i++) {
 		if (vhost[i]->state != HOST_RECONNECTED) {
@@ -333,7 +335,16 @@ void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
 	}
 }
 
-void set_timer(int timerfd, unsigned int msec)
+static int init_timer(void)
+{
+	int timer = timerfd_create(CLOCK_MONOTONIC, 0);
+
+	assert(timer != -1);
+	return timer;
+}
+
+
+static void set_timer(int timerfd, unsigned int msec)
 {
 	struct itimerspec ts = { .it_value = { msec / 1000,
 					       (msec % 1000) * 1000000 } };
@@ -357,7 +368,7 @@ void rvgpu_ctx_wakeup(struct ctx_priv *ctx)
 	pthread_mutex_unlock(&ctx->reset.lock);
 }
 
-void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
+static void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
 		unsigned int res_cnt, unsigned int idx)
 {
 	if (cmd_cnt) {
@@ -374,7 +385,7 @@ void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
 	}
 }
 
-void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
+static void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
 
@@ -382,7 +393,7 @@ void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
 		ctx_priv->gpu_reset_cb(ctx, state);
 }
 
-void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
+static void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 		  unsigned int host_count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
@@ -402,7 +413,7 @@ void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	rvgpu_ctx_wakeup(ctx_priv);
 }
 
-bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
+static bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 		   unsigned int *active_sessions, unsigned int count)
 {
 	bool ses_hung = false;
@@ -423,7 +434,7 @@ bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 	return ses_hung;
 }
 
-bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
+static bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 			int reconn_fd, unsigned int count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
@@ -447,15 +458,7 @@ bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	return reconnected;
 }
 
-int init_timer(void)
-{
-	int timer = timerfd_create(CLOCK_MONOTONIC, 0);
-
-	assert(timer != -1);
-	return timer;
-}
-
-unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
+static unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
 			  struct pollfd **ses_timer,
 			  struct pollfd **recon_timer, struct pollfd **cmd_host,
 			  struct pollfd **cmd_pipe, struct pollfd **res_host,
@@ -490,7 +493,7 @@ unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
 	return pfd_count;
 }
 
-unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
+static unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 		     struct pollfd *pfd, struct poll_entries *p_entry)
 {
 	unsigned int pfd_count =
@@ -752,7 +755,7 @@ void flush_input_pipes(struct ctx_priv *ctx, int devnull, enum pipe_type p)
 	}
 }
 
-void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
+static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 		   int cmd_count, int res_count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
