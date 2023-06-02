@@ -540,17 +540,6 @@ static unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 	return pfd_count;
 }
 
-unsigned int get_input_ev(struct pollfd *pipe_in, unsigned int count)
-{
-	unsigned int in_pipes = 0;
-
-	for (unsigned int i = 0; i < count; i++) {
-		if (pipe_in[i].revents & POLLIN)
-			in_pipes++;
-	}
-	return in_pipes;
-}
-
 int write_all(int fd, const void *buf, size_t bytes)
 {
 	size_t offset = 0;
@@ -691,68 +680,6 @@ unsigned int handle_host_res(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 		}
 	}
 	return sent;
-}
-
-void disable_input(struct pollfd *pipe_in, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		pipe_in[i].events &= ~POLLIN;
-}
-
-void enable_input(struct pollfd *pipe_in, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		pipe_in[i].events |= POLLIN;
-}
-
-void set_in_out(struct pollfd *host, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		host[i].events = POLLIN | POLLOUT;
-}
-
-void set_in(struct pollfd *host, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		host[i].events = POLLIN;
-}
-
-void flush_input_pipes(struct ctx_priv *ctx, int devnull, enum pipe_type p)
-{
-	struct vgpu_host *cmd = ctx->cmd;
-	struct vgpu_host *res = ctx->res;
-	struct pollfd pipe_in[MAX_HOSTS];
-	unsigned int host_count = 0;
-
-	if (p == COMMAND) {
-		for (unsigned int i = 0; i < ctx->cmd_count; i++) {
-			pipe_in[i].fd = cmd[i].host_p[PIPE_READ];
-			pipe_in[i].events = POLLIN;
-		}
-		host_count = ctx->cmd_count;
-	}
-	if (p == RESOURCE) {
-		for (unsigned int i = 0; i < ctx->res_count; i++) {
-			pipe_in[i].fd = res[i].host_p[PIPE_READ];
-			pipe_in[i].events = POLLIN;
-		}
-		host_count = ctx->res_count;
-	}
-
-	if (!host_count)
-		return;
-
-	while (1) {
-		int rc = poll(pipe_in, host_count, 0);
-
-		if (!rc)
-			return;
-		for (unsigned int i = 0; i < host_count; i++) {
-			if (pipe_in[i].revents & POLLIN)
-				splice(pipe_in[i].fd, NULL, devnull, NULL,
-				       PIPE_SIZE, SPLICE_F_NONBLOCK);
-		}
-	}
 }
 
 static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
