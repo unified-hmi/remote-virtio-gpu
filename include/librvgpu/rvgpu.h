@@ -266,7 +266,6 @@ int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
 		     struct rvgpu_scanout_arguments *args);
 void free_communic_pipes(struct rvgpu_scanout *scanout);
 int init_communic_pipes(struct rvgpu_scanout *scanout);
-void flush_input_pipes(struct ctx_priv *ctx, int devnull, enum pipe_type p);
 int read_all(int fd, void *buf, size_t bytes);
 void *thread_conn_tcp(void *arg);
 
