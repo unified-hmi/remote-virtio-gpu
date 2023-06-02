@@ -190,6 +190,7 @@ int main(int argc, char **argv)
 	     user_specified_scanouts = false;
 
 	memset(sp, 0, sizeof(sp));
+	memset(&pp, 0, sizeof(pp));
 
 	while ((opt = getopt(argc, argv, "afhvi:c:s:S:b:B:p:g:")) != -1) {
 		switch (opt) {
