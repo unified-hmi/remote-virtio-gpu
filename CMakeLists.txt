@@ -33,9 +33,9 @@ add_subdirectory(src)
 
 include(GNUInstallDirs)
 install(FILES settings/virgl.capset
-        DESTINATION /etc
+        DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}
 )
 install(DIRECTORY settings/udev/
-        DESTINATION /usr/lib/udev/rules.d
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/udev/rules.d
         FILES_MATCHING PATTERN "*.rules"
 )
