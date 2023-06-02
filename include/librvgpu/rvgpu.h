@@ -262,10 +262,6 @@ int rvgpu_send(struct rvgpu_scanout *scanout, enum pipe_type p, const void *buf,
  */
 void rvgpu_frontend_reset_state(struct rvgpu_ctx *ctx, enum reset_state state);
 
-int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
-		     struct rvgpu_scanout_arguments *args);
-void free_communic_pipes(struct rvgpu_scanout *scanout);
-int init_communic_pipes(struct rvgpu_scanout *scanout);
 int read_all(int fd, void *buf, size_t bytes);
 void *thread_conn_tcp(void *arg);
 
