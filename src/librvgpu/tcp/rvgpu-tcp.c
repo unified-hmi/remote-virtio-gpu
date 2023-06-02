@@ -35,6 +35,19 @@
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu.h>
 
+struct poll_entries {
+	struct pollfd *ses_timer;
+	struct pollfd *recon_timer;
+	struct pollfd *cmd_host;
+	struct pollfd *cmd_pipe_in;
+	struct pollfd *res_host;
+	struct pollfd *res_pipe_in;
+};
+
+struct conninfo {
+	struct addrinfo *servinfo, *p;
+};
+
 int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
 		     struct rvgpu_scanout_arguments *args)
 {

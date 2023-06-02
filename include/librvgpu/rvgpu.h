@@ -39,19 +39,6 @@ struct gpu_reset {
 	pthread_cond_t cond;
 };
 
-struct poll_entries {
-	struct pollfd *ses_timer;
-	struct pollfd *recon_timer;
-	struct pollfd *cmd_host;
-	struct pollfd *cmd_pipe_in;
-	struct pollfd *res_host;
-	struct pollfd *res_pipe_in;
-};
-
-struct conninfo {
-	struct addrinfo *servinfo, *p;
-};
-
 struct conn_pipes {
 	int rcv_pipe[2];
 	int snd_pipe[2];
