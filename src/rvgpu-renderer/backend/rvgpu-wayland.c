@@ -36,13 +36,19 @@
 
 #include <librvgpu/rvgpu-protocol.h>
 #include <rvgpu-renderer/ivi/ivi-application-client-protocol.h>
+#include <rvgpu-renderer/shell/xdg-shell-client-protocol.h>
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <rvgpu-renderer/renderer/rvgpu-input.h>
 
 struct rvgpu_native {
+	struct rvgpu_wl_state *wl_state;
+	bool xdg_wm_base_waiting_for_configure;
+
 	/* Window structures */
 	struct wl_surface *surface;
 	struct wl_shell_surface *shell_surface;
+	struct xdg_surface *xdg_surface;
+	struct xdg_toplevel *xdg_toplevel;
 	struct wl_egl_window *egl_window;
 	struct ivi_surface *ivi_surface;
 };
@@ -57,6 +63,7 @@ struct rvgpu_wl_state {
 	struct wl_pointer *pointer;
 	struct wl_keyboard *keyboard;
 	struct wl_shell *shell;
+	struct xdg_wm_base *wm_base;
 	struct ivi_application *ivi_app;
 
 	/* EGL structures */
@@ -80,6 +87,16 @@ static inline struct rvgpu_wl_state *to_wl(struct rvgpu_egl_state *e)
 
 static struct wl_seat_listener seat_listener;
 
+static void xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial)
+{
+	(void)data;
+	xdg_wm_base_pong(xdg_wm_base, serial);
+}
+ 
+static const struct xdg_wm_base_listener xdg_wm_base_listener = {
+	.ping = xdg_wm_base_ping,
+};
+
 static void registry_add_object(void *data, struct wl_registry *registry,
 				uint32_t name, const char *interface,
 				uint32_t version)
@@ -93,6 +110,11 @@ static void registry_add_object(void *data, struct wl_registry *registry,
 	} else if (!strcmp(interface, wl_shell_interface.name)) {
 		r->shell = wl_registry_bind(registry, name, &wl_shell_interface,
 					    1);
+	} else if (!strcmp(interface, xdg_wm_base_interface.name)) {
+		r->wm_base = wl_registry_bind(registry, name,
+					      &xdg_wm_base_interface, 1);
+		xdg_wm_base_add_listener(r->wm_base, &xdg_wm_base_listener,
+					 NULL);
 	} else if (!strcmp(interface, wl_seat_interface.name)) {
 		r->seat =
 			wl_registry_bind(registry, name, &wl_seat_interface, 1);
@@ -139,6 +161,75 @@ static void shell_surface_configure(void *data,
 static const struct wl_shell_surface_listener shell_surface_listener = {
 	.ping = &shell_surface_ping,
 	.configure = &shell_surface_configure,
+};
+
+static void xdg_surface_configure(void *data,
+	struct xdg_surface *xdg_surface, uint32_t serial)
+{
+	(void)data;
+	xdg_surface_ack_configure(xdg_surface, serial);
+}
+
+static const struct xdg_surface_listener xdg_surface_listener = {
+	.configure = xdg_surface_configure,
+};
+
+static void
+xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel,
+		       int32_t width, int32_t height,
+		       struct wl_array *states)
+{
+	struct rvgpu_scanout *s = data;
+	struct rvgpu_native *n = s->native;
+	struct rvgpu_wl_state *r = n->wl_state;
+
+	(void)xdg_toplevel;
+	(void)states;
+
+	if (width && height) {
+		s->window.w = (unsigned int)width;
+		s->window.h = (unsigned int)height;
+	}
+
+	if (!n->egl_window) {
+		n->egl_window = wl_egl_window_create(n->surface,
+						     (int)s->window.w,
+						     (int)s->window.h);
+		assert(n->egl_window);
+	} else {
+		wl_egl_window_resize(n->egl_window,
+				     (int)s->window.w,
+				     (int)s->window.h, 0, 0);
+	}
+
+	if (r->fullscreen) {
+		xdg_toplevel_set_fullscreen(n->xdg_toplevel, NULL);
+	} else {
+		if (!r->translucent) {
+			struct wl_region *region =
+				wl_compositor_create_region(r->comp);
+			assert(region);
+			wl_region_add(region, 0, 0, (int)s->window.w,
+				      (int)s->window.h);
+			wl_surface_set_opaque_region(n->surface,
+						     region);
+			wl_region_destroy(region);
+		}
+	}
+
+	n->xdg_wm_base_waiting_for_configure = false;
+}
+
+static void
+xdg_toplevel_close(void *data, struct xdg_toplevel *toplevel)
+{
+	(void)data;
+	(void)toplevel;
+}
+
+static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+	.configure = xdg_toplevel_configure,
+	.close = xdg_toplevel_close,
 };
 
 static void handle_ivi_surface_configure(void *data,
@@ -490,6 +581,12 @@ static void rvgpu_wl_destroy_scanout(struct rvgpu_egl_state *e,
 	if (s->native->shell_surface)
 		wl_shell_surface_destroy(s->native->shell_surface);
 
+	if (s->native->xdg_toplevel)
+		xdg_toplevel_destroy(s->native->xdg_toplevel);
+
+	if (s->native->xdg_surface)
+		xdg_surface_destroy(s->native->xdg_surface);
+
 	if (s->native->ivi_surface)
 		ivi_surface_destroy(s->native->ivi_surface);
 
@@ -510,6 +607,9 @@ static void rvgpu_wl_free(struct rvgpu_egl_state *e)
 	if (r->shell)
 		wl_shell_destroy(r->shell);
 
+	if (r->wm_base)
+		xdg_wm_base_destroy(r->wm_base);
+
 	wl_seat_destroy(r->seat);
 	if (r->pointer)
 		wl_pointer_destroy(r->pointer);
@@ -528,6 +628,7 @@ static void rvgpu_wl_free(struct rvgpu_egl_state *e)
 static size_t rvgpu_wl_prepare_events(struct rvgpu_egl_state *e, void *ev,
 				      size_t max)
 {
+	(void)max;
 	assert(max >= 1);
 	struct rvgpu_wl_state *r = to_wl(e);
 	int fd = wl_display_get_fd(r->dpy);
@@ -549,6 +650,7 @@ static size_t rvgpu_wl_prepare_events(struct rvgpu_egl_state *e, void *ev,
 static void rvgpu_wl_process_events(struct rvgpu_egl_state *e, const void *ev,
 				    size_t n)
 {
+	(void)n;
 	assert(n >= 1);
 	struct rvgpu_wl_state *r = to_wl(e);
 	short revents;
@@ -591,12 +693,15 @@ static void rvgpu_wl_set_scanout(struct rvgpu_egl_state *e,
 static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 				    struct rvgpu_scanout *s)
 {
+	char title[32];
+	char id[64];
 	struct rvgpu_wl_state *r = to_wl(e);
 	struct rvgpu_native *n;
 	const struct rvgpu_scanout_params *sp = &s->params;
 
 	n = calloc(1, sizeof(*n));
 	assert(n);
+	n->wl_state = r;
 
 	s->native = n;
 	if (r->fullscreen) {
@@ -612,6 +717,18 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 	n->surface = wl_compositor_create_surface(r->comp);
 	assert(n->surface);
 	wl_surface_set_user_data(n->surface, s);
+
+	if (sp->id != 0) {
+		snprintf(title, sizeof(title), "rvgpu scanout %u ID %u",
+			 s->scanout_id, sp->id);
+		snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u.id%u",
+			 s->scanout_id, sp->id);
+	} else {
+		snprintf(title, sizeof(title), "rvgpu scanout %u",
+			 s->scanout_id);
+		snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u",
+			 s->scanout_id);
+	}
 
 	if (r->ivi_app) {
 		uint32_t id;
@@ -629,8 +746,39 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 		assert(n->ivi_surface);
 		ivi_surface_add_listener(n->ivi_surface, &ivi_surface_listener,
 					 s);
+
+		n->egl_window = wl_egl_window_create(n->surface, (int)s->window.w,
+						     (int)s->window.h);
+		assert(n->egl_window);
+
+	} else if (r->wm_base) {
+
+		if (r->shell)
+			wl_shell_destroy(r->shell);
+		r->shell = NULL;
+
+		n->xdg_wm_base_waiting_for_configure = true;
+		n->egl_window = NULL;
+
+		n->xdg_surface = xdg_wm_base_get_xdg_surface(r->wm_base, n->surface);
+		assert(n->xdg_surface);
+
+		xdg_surface_add_listener(n->xdg_surface, &xdg_surface_listener, s);
+
+		n->xdg_toplevel = xdg_surface_get_toplevel(n->xdg_surface);
+		assert(n->xdg_toplevel);
+
+		xdg_toplevel_add_listener(n->xdg_toplevel, &xdg_toplevel_listener, s);
+
+		xdg_toplevel_set_app_id(n->xdg_toplevel, id);
+		xdg_toplevel_set_title(n->xdg_toplevel, title);
+
+		wl_surface_commit(n->surface);
+
+		while (n->xdg_wm_base_waiting_for_configure)
+			wl_display_roundtrip(r->dpy);
+
 	} else if (r->shell) {
-		char title[32];
 
 		n->shell_surface =
 			wl_shell_get_shell_surface(r->shell, n->surface);
@@ -638,13 +786,6 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 
 		wl_shell_surface_add_listener(n->shell_surface,
 					      &shell_surface_listener, s);
-		if (sp->id != 0) {
-			snprintf(title, sizeof(title), "rvgpu scanout %u ID %u",
-				 s->scanout_id, sp->id);
-		} else {
-			snprintf(title, sizeof(title), "rvgpu scanout %u",
-				 s->scanout_id);
-		}
 		wl_shell_surface_set_title(n->shell_surface, title);
 
 		if (r->fullscreen) {
@@ -665,11 +806,13 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 				wl_region_destroy(region);
 			}
 		}
+
+		n->egl_window = wl_egl_window_create(n->surface, (int)s->window.w,
+						     (int)s->window.h);
+		assert(n->egl_window);
+
 	}
 
-	n->egl_window = wl_egl_window_create(n->surface, (int)s->window.w,
-					     (int)s->window.h);
-	assert(n->egl_window);
 
 	s->surface =
 		eglCreateWindowSurface(e->dpy, e->config, n->egl_window, NULL);
@@ -708,6 +851,7 @@ struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
 	wl_registry_add_listener(r->reg, &registry_listener, r);
 	res = wl_display_roundtrip(r->dpy);
 	assert(res != -1);
+	(void)res;
 
 	/* EGL initialization */
 	r->egl.dpy = eglGetDisplay(r->dpy);
