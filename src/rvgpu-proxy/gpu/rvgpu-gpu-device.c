@@ -251,7 +251,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 	rvgpu_be = calloc(1, sizeof(*rvgpu_be));
 	if (rvgpu_be == NULL) {
 		warnx("failed to allocate backend: %s", strerror(errno));
-		goto err_be;
+		goto error;
 	}
 
 	char str_lib[] = "librvgpu.so";
@@ -263,7 +263,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 	if (rvgpu_be->lib_handle == NULL) {
 		warnx("failed to open backend library '%s': %s", str_lib,
 		      dlerror());
-		goto err_sym;
+		goto error_free;
 	}
 
 	struct rvgpu_ctx_arguments ctx_args = {
@@ -274,7 +274,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 
 	if (rvgpu_init_ctx(rvgpu_be, ctx_args)) {
 		warnx("failed to init rvgpu ctx");
-		goto err_sym;
+		goto error_dlclose;
 	}
 
 	for (int i = 0; i < servers->host_cnt; i++) {
@@ -284,15 +284,16 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 
 	if (rvgpu_init_backends(rvgpu_be, scanout_args)) {
 		warnx("failed to init rvgpu backends");
-		goto err_sym;
+		goto error_dlclose;
 	}
 
 	return rvgpu_be;
-err_sym:
-	free(rvgpu_be);
-err_be:
-	dlclose(rvgpu_be->lib_handle);
 
+error_dlclose:
+	dlclose(rvgpu_be->lib_handle);
+error_free:
+	free(rvgpu_be);
+error:
 	return NULL;
 }
 
