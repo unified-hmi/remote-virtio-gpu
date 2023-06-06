@@ -20,6 +20,9 @@ cmake_minimum_required(VERSION 3.2)
 project(rvgpu C)
 set(CMAKE_C_STANDARD 11)
 
+set(CMAKE_C_FLAGS       "${CMAKE_C_FLAGS} -Wall -Wextra")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Werror")
+
 if (CMAKE_SYSROOT AND NOT ENV{PKG_CONFIG_LIBDIR})
 	set(ENV{PKG_CONFIG_DIR} "")
 	set(ENV{PKG_CONFIG_LIBDIR} "${CMAKE_SYSROOT}/usr/lib/pkgconfig:${CMAKE_SYSROOT}/usr/share/pkgconfig")

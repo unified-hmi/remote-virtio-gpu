@@ -86,6 +86,7 @@ static struct wl_seat_listener seat_listener;
 
 static void xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial)
 {
+	(void)data;
 	xdg_wm_base_pong(xdg_wm_base, serial);
 }
  
@@ -162,7 +163,7 @@ static const struct wl_shell_surface_listener shell_surface_listener = {
 static void xdg_surface_configure(void *data,
 	struct xdg_surface *xdg_surface, uint32_t serial)
 {
-	struct client_state *state = data;
+	(void)data;
 	xdg_surface_ack_configure(xdg_surface, serial);
 }
 
@@ -176,6 +177,9 @@ xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel,
 		       struct wl_array *states)
 {
 	struct rvgpu_scanout *s = data;
+
+	(void)xdg_toplevel;
+	(void)states;
 
 	if (width == 0 || height == 0) {
 		/* Client should decide its own window dimensions.
@@ -191,6 +195,8 @@ xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel,
 static void
 xdg_toplevel_close(void *data, struct xdg_toplevel *toplevel)
 {
+	(void)data;
+	(void)toplevel;
 }
 
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
@@ -594,6 +600,7 @@ static void rvgpu_wl_free(struct rvgpu_egl_state *e)
 static size_t rvgpu_wl_prepare_events(struct rvgpu_egl_state *e, void *ev,
 				      size_t max)
 {
+	(void)max;
 	assert(max >= 1);
 	struct rvgpu_wl_state *r = to_wl(e);
 	int fd = wl_display_get_fd(r->dpy);
@@ -615,6 +622,7 @@ static size_t rvgpu_wl_prepare_events(struct rvgpu_egl_state *e, void *ev,
 static void rvgpu_wl_process_events(struct rvgpu_egl_state *e, const void *ev,
 				    size_t n)
 {
+	(void)n;
 	assert(n >= 1);
 	struct rvgpu_wl_state *r = to_wl(e);
 	short revents;
@@ -739,6 +747,7 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
                wl_surface_commit(n->surface);
 
                int res = wl_display_roundtrip(r->dpy);
+	       (void)res;
                assert(res != -1);
 
 	} else if (r->shell) {
@@ -812,6 +821,7 @@ struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
 	wl_registry_add_listener(r->reg, &registry_listener, r);
 	res = wl_display_roundtrip(r->dpy);
 	assert(res != -1);
+	(void)res;
 
 	/* EGL initialization */
 	r->egl.dpy = eglGetDisplay(r->dpy);

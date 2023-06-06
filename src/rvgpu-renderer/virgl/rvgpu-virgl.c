@@ -128,6 +128,7 @@ static void virgl_write_fence(void *opaque, uint32_t fence)
 	int res = write_all(state->res_socket, &msg,
 			    sizeof(struct rvgpu_res_message_header));
 	assert(res >= 0);
+	(void)res;
 }
 
 static struct virgl_renderer_callbacks virgl_cbs = {
@@ -284,7 +285,7 @@ resource_attach_backing(struct virtio_gpu_resource_attach_backing *r,
 
 static void load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
 {
-	struct rvgpu_patch header = { 0, 0 };
+	struct rvgpu_patch header = { 0, 0, 0 };
 	int stream = COMMAND;
 	uint32_t offset = 0;
 
