@@ -333,6 +333,7 @@ static size_t rvgpu_gbm_prepare_events(struct rvgpu_egl_state *e, void *ev,
 	struct rvgpu_gbm_state *g = to_gbm(e);
 
 	assert(max >= 2);
+	(void)max;
 	struct pollfd *fds = (struct pollfd *)ev;
 
 	fds[0].fd = g->gbm_fd;

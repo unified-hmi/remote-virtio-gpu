@@ -16,7 +16,6 @@
 #
 
 add_library(rvgpu-sanity OBJECT rvgpu-sanity.c)
-
 target_include_directories(rvgpu-sanity
 	PRIVATE
 		${PROJECT_SOURCE_DIR}/include)

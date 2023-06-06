@@ -25,7 +25,6 @@
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 
 static struct rvgpu_scanout_params _sout_params;
-static bool _swap_skip;
 struct rect {
 	int x;
 	int y;
@@ -58,6 +57,7 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 
 	res = eglInitialize(e->dpy, NULL, NULL);
 	assert(res);
+	(void)res;
 
 	eglBindAPI(EGL_OPENGL_ES_API);
 	eglChooseConfig(e->dpy, config_attribs, &e->config, 1, &n);
