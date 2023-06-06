@@ -249,9 +249,7 @@ int main(int argc, char **argv)
 		fclose(oomFile);
 	}
 
-	dev = gpu_device_init(lo_fd, epoll_fd, PROXY_GPU_CONFIG,
-			      PROXY_GPU_QUEUES, capset, &params, rvgpu_be);
-
+	dev = gpu_device_init(lo_fd, epoll_fd, capset, &params, rvgpu_be);
 	if (!dev)
 		err(1, "gpu device init");
 
