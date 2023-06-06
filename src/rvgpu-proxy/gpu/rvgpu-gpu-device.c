@@ -177,8 +177,8 @@ int write_all(int fd, const void *buf, size_t bytes)
 	return offset;
 }
 
-int rvgpu_init_backends(struct rvgpu_backend *b,
-			struct rvgpu_scanout_arguments *scanout_args)
+static int rvgpu_init_backends(struct rvgpu_backend *b,
+			       struct rvgpu_scanout_arguments *scanout_args)
 {
 	struct rvgpu_ctx *ctx = &b->plugin_v1.ctx;
 	void *plugin = b->lib_handle;
@@ -208,7 +208,7 @@ err_sym:
 	return -1;
 }
 
-int rvgpu_init_ctx(struct rvgpu_backend *b, struct rvgpu_ctx_arguments ctx_args)
+static int rvgpu_init_ctx(struct rvgpu_backend *b, struct rvgpu_ctx_arguments ctx_args)
 {
 	struct rvgpu_ctx *ctx = &b->plugin_v1.ctx;
 	struct rvgpu_backend *be = b;
