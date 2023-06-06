@@ -169,7 +169,7 @@ int rvgpu_send(struct rvgpu_scanout *scanout, enum pipe_type p, const void *buf,
 	 * NONBLOCKING mode, write will return EAGAIN. Backend device
 	 * should ignore this.
 	 */
-	return ((rc != len) && (errno == EAGAIN)) ? len : rc;
+	return ((rc == -1) && (errno == EAGAIN)) ? (int)len : rc;
 }
 
 int rvgpu_init(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
@@ -217,6 +217,7 @@ error:
 
 void rvgpu_destroy(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout)
 {
+	(void)ctx;
 	if (scanout) {
 		free_communic_pipes(scanout);
 		free(scanout->priv);

@@ -277,7 +277,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 		goto error_dlclose;
 	}
 
-	for (int i = 0; i < servers->host_cnt; i++) {
+	for (unsigned int i = 0; i < servers->host_cnt; i++) {
 		scanout_args[i].tcp.ip = strdup(servers->hosts[i].hostname);
 		scanout_args[i].tcp.port = strdup(servers->hosts[i].portnum);
 	}
@@ -393,7 +393,7 @@ void destroy_async_resp(struct gpu_device *g)
 	free(r);
 }
 
-struct async_resp *init_async_resp(struct gpu_device *g)
+static struct async_resp *init_async_resp(void)
 {
 	struct async_resp *r;
 
@@ -451,6 +451,7 @@ static void *resource_thread_func(void *param)
 				ssize_t ret = s->plugin_v1.ops.rvgpu_recv_all(
 					s, RESOURCE, &msg, sizeof(msg));
 				assert(ret > 0);
+				(void)ret;
 
 				if (msg.type == RVGPU_FENCE) {
 					recv_fence_flags[i] = 1;
@@ -480,6 +481,8 @@ static void *resource_thread_func(void *param)
 			}
 		}
 	}
+
+	return NULL;
 }
 
 struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
@@ -488,9 +491,7 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 {
 	struct gpu_device *g;
 	struct virtio_lo_qinfo q[2];
-	pthread_t fence_thread;
 	unsigned int i;
-	int ret;
 
 	struct virtio_lo_devinfo info = {
 		.nqueues = 2u,
@@ -566,7 +567,7 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 		  &(struct epoll_event){ .events = EPOLLIN,
 					 .data = { .u32 = PROXY_GPU_QUEUES } });
 
-	g->async_resp = init_async_resp(g);
+	g->async_resp = init_async_resp();
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->async_resp->fence_pipe[PIPE_READ],
 		  &(struct epoll_event){ .events = EPOLLIN,
 					 .data = { .u32 = PROXY_GPU_QUEUES } });
@@ -841,6 +842,7 @@ static uint64_t gpu_device_read_vsync(struct gpu_device *g)
 
 void backend_reset_state(struct rvgpu_ctx *ctx, enum reset_state state)
 {
+	(void)ctx;
 	gpu_reset_state = state;
 }
 
@@ -854,7 +856,7 @@ static unsigned long delta_time_nsec(struct timespec start,
 static void set_timer(int timerfd, unsigned long framerate,
 		      unsigned long vsync_time)
 {
-	struct itimerspec ts = { { 0 } };
+	struct itimerspec ts = { { 0 }, { 0 } };
 
 	if (framerate > 0) {
 		unsigned long vsync_delta = 0, rate = 1000000000UL / framerate;
@@ -1158,7 +1160,6 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
-	bool flush = false;
 
 	while (vqueue_get_request(g->lo_fd, &g->vq[1], &g->cursor)) {
 		union virtio_gpu_cmd r;
@@ -1196,7 +1197,6 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 
 			switch (r.hdr.type) {
 			case VIRTIO_GPU_CMD_UPDATE_CURSOR:
-				flush = true;
 				break;
 			default:
 			case VIRTIO_GPU_CMD_MOVE_CURSOR:
