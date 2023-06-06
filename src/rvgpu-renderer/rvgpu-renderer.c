@@ -182,7 +182,7 @@ int main(int argc, char **argv)
 	char *errstr = NULL;
 	const char *carddev = NULL;
 	const char *seat = "seat0";
-	int w, h, x, y, opt, res, res_socket = 0;
+	int w, h, x, y, opt, res_socket = 0;
 	unsigned int res_id, scanout;
 	uint16_t port_nr = RVGPU_DEFAULT_PORT;
 	FILE *input_stream = stdout;
