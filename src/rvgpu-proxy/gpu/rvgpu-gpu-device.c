@@ -482,8 +482,7 @@ static void *resource_thread_func(void *param)
 	}
 }
 
-struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
-				   uint32_t qidx, int capset,
+struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 				   const struct gpu_device_params *params,
 				   struct rvgpu_backend *b)
 {
@@ -555,22 +554,22 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
 
 		epoll_ctl(efd, EPOLL_CTL_ADD, g->vsync_fd,
 			  &(struct epoll_event){ .events = EPOLLIN | EPOLLET,
-						 .data = { .u32 = qidx } });
+						 .data = { .u32 = PROXY_GPU_QUEUES } });
 	} else {
 		g->vsync_fd = -1;
 	}
 
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->config_fd,
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = cidx } });
+					 .data = { .u32 = PROXY_GPU_CONFIG } });
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->kick_fd,
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = qidx } });
+					 .data = { .u32 = PROXY_GPU_QUEUES } });
 
 	g->async_resp = init_async_resp(g);
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->async_resp->fence_pipe[PIPE_READ],
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = qidx } });
+					 .data = { .u32 = PROXY_GPU_QUEUES } });
 
 	g->backend = b;
 
