@@ -445,6 +445,74 @@ static void gpu_device_send_command(struct rvgpu_backend *u, void *buf,
 	}
 }
 
+static void read_from_pipe(struct rvgpu_scanout *s, char *buf, size_t size)
+{
+	size_t offset = 0;
+	int ret = 0;
+
+	while (offset < size) {
+		ret = s->plugin_v1.ops.rvgpu_recv(
+		    s, RESOURCE, (buf) ? buf + offset : buf, size - offset);
+
+		if (ret == (int)size)
+			break;
+
+		if (ret <= 0)
+			err(1, "Short read res pipe");
+
+		offset += ret;
+		if (offset > size)
+			err(1, "Buffer overflow");
+	}
+}
+
+static void resource_update(struct rvgpu_scanout *s, const struct iovec iovs[],
+			    size_t niov, size_t skip, size_t length)
+{
+	for (size_t i = 0u; i < niov && length > 0u; i++) {
+		const struct iovec *iov = &iovs[i];
+		if (skip >= iov->iov_len) {
+			skip -= iov->iov_len;
+		} else {
+			size_t l = iov->iov_len - skip;
+			if (l > length) {
+				l = length;
+			}
+			read_from_pipe(s, (char *)iov->iov_base + skip, l);
+			skip = 0u;
+			length -= l;
+		}
+	}
+}
+
+static void resource_transfer(struct gpu_device *g, struct rvgpu_scanout *s)
+{
+	struct rvgpu_header header = {0, 0, 0};
+	struct rvgpu_patch patch = {0, 0, 0};
+	struct virtio_gpu_transfer_host_3d t;
+	struct rvgpu_res *res;
+
+	read_from_pipe(s, (char *)&header, sizeof(header));
+
+	if (header.size != sizeof(t))
+		err(1, "Resource transfer protocol error");
+
+	read_from_pipe(s, (char *)&t, sizeof(t));
+	read_from_pipe(s, (char *)&patch, sizeof(patch));
+
+	res = g->backend->plugin_v1.ops.rvgpu_ctx_res_find(
+	    &g->backend->plugin_v1.ctx, t.resource_id);
+
+	if (!res || !res->backing) {
+		fprintf(stderr, "insufficient resource id %d, res %p\n",
+			t.resource_id, res);
+		return;
+	}
+
+	resource_update(s, res->backing, res->nbacking, patch.offset,
+			patch.len);
+}
+
 static void *resource_thread_func(void *param)
 {
 	struct gpu_device *g = (struct gpu_device *)param;
@@ -497,6 +565,9 @@ static void *resource_thread_func(void *param)
 							sizeof(sync_fence_id));
 						assert(ret >= 0);
 					}
+				} else if (msg.type == RVGPU_RES_TRANSFER) {
+					resource_transfer(
+					    g, &b->plugin_v1.scanout[i]);
 				}
 			}
 		}
