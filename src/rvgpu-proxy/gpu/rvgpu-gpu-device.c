@@ -425,6 +425,26 @@ int wait_resource_events(struct rvgpu_backend *b, short int *revents)
 					       events, revents);
 }
 
+static void gpu_device_send_command(struct rvgpu_backend *u, void *buf,
+				    size_t size, bool notify_all)
+{
+	struct rvgpu_scanout *s;
+	int ret;
+
+	if (notify_all) {
+		if (u->plugin_v1.ops.rvgpu_ctx_send(&u->plugin_v1.ctx, buf,
+						    size)) {
+			warn("short write");
+		}
+	} else {
+		s = &u->plugin_v1.scanout[0];
+		ret = s->plugin_v1.ops.rvgpu_send(s, COMMAND, buf, size);
+
+		if (ret != (int)size)
+			warn("short write");
+	}
+}
+
 static void *resource_thread_func(void *param)
 {
 	struct gpu_device *g = (struct gpu_device *)param;
@@ -988,6 +1008,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		resp.hdr.type = sanity_check_gpu_ctrl(&r, rhdr.size, true);
 
 		if (resp.hdr.type == VIRTIO_GPU_RESP_OK_NODATA) {
+			bool notify_all = true;
 			size_t i;
 
 			if (r.hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
@@ -997,18 +1018,16 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				add_resp(g, &resp.hdr, &g->ctrl);
 			}
 
-			if (b->plugin_v1.ops.rvgpu_ctx_send(
-				    &b->plugin_v1.ctx, &rhdr, sizeof(rhdr))) {
-				warn("short write");
-			}
+			if (r.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
+				notify_all = false;
+
+			gpu_device_send_command(b, &rhdr, sizeof(rhdr),
+						notify_all);
 			for (i = 0u; i < g->ctrl.nr; i++) {
 				struct iovec *iov = &g->ctrl.r[i];
 
-				if (b->plugin_v1.ops.rvgpu_ctx_send(
-					    &b->plugin_v1.ctx, iov->iov_base,
-					    iov->iov_len)) {
-					warn("short write");
-				}
+				gpu_device_send_command(
+					b, iov->iov_base, iov->iov_len, notify_all);
 			}
 
 			/* command is sane, parse it */
@@ -1182,18 +1201,12 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 				resp.ctx_id = r.hdr.ctx_id;
 			}
 
-			if (b->plugin_v1.ops.rvgpu_ctx_send(
-				    &b->plugin_v1.ctx, &rhdr, sizeof(rhdr))) {
-				warn("short write");
-			}
+			gpu_device_send_command(b, &rhdr, sizeof(rhdr), true);
 			for (unsigned int i = 0u; i < g->cursor.nr; i++) {
 				struct iovec *iov = &g->cursor.r[i];
 
-				if (b->plugin_v1.ops.rvgpu_ctx_send(
-					    &b->plugin_v1.ctx, iov->iov_base,
-					    iov->iov_len)) {
-					warn("short write");
-				}
+				gpu_device_send_command(b, iov->iov_base,
+							iov->iov_len, true);
 			}
 
 			switch (r.hdr.type) {
