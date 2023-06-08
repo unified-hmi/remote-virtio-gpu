@@ -103,6 +103,7 @@ enum rvgpu_res_message_type {
 	RVGPU_RES_RESP = 1 << 1, /**< response with the resource */
 	RVGPU_RES_NOT = 1 << 2, /**< notification that resource is not needed */
 	RVGPU_FENCE = 1 << 3, /**< fence completion notification */
+	RVGPU_RES_TRANSFER = 1 << 4, /**< response of TRANSFER_FROM_HOST3D */
 };
 
 /**
