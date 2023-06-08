@@ -324,6 +324,64 @@ static bool load_resource(struct rvgpu_pr_state *state, unsigned int res_id)
 	return load;
 }
 
+static void write_to_socket(int socket, char *buf, size_t size)
+{
+	size_t offset = 0;
+	ssize_t ret = 0;
+	struct pollfd pfd;
+
+	while (offset < size) {
+		pfd.fd = socket;
+		pfd.events = POLLOUT;
+		poll(&pfd, 1, -1);
+
+		if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+			err(1, "Resource socket error write_to_socket");
+		}
+
+		ret = write(socket, buf + offset, size - offset);
+
+		if (ret == (ssize_t)size)
+			break;
+
+		if (ret <= 0)
+			err(1, "Short read res pipe");
+
+		offset += ret;
+		if (offset > size)
+			err(1, "Buffer overflow");
+	}
+}
+
+static void upload_resource(struct rvgpu_pr_state *state,
+			    struct virtio_gpu_transfer_host_3d *t)
+{
+	struct iovec *p = NULL;
+	int iovn = 0;
+	struct rvgpu_res_message_header transfer = {.type = RVGPU_RES_TRANSFER};
+	struct rvgpu_header header = {
+	    .size = sizeof(struct virtio_gpu_transfer_host_3d)};
+	struct rvgpu_patch patch;
+
+	virgl_renderer_resource_detach_iov(t->resource_id, &p, &iovn);
+	if (p == NULL)
+		err(1, "invalid resource transfer");
+
+	write_to_socket(state->res_socket, (char *)&transfer, sizeof(transfer));
+	write_to_socket(state->res_socket, (char *)&header, sizeof(header));
+	write_to_socket(state->res_socket, (char *)t,
+			sizeof(struct virtio_gpu_transfer_host_3d));
+
+	patch.offset = t->offset;
+	patch.len = p[0].iov_len - patch.offset;
+
+	write_to_socket(state->res_socket, (char *)&patch, sizeof(patch));
+	write_to_socket(state->res_socket, (char *)p[0].iov_base + patch.offset,
+			patch.len);
+
+	virgl_renderer_resource_attach_iov(t->resource_id, p, iovn);
+}
+
 static void set_scanout(struct rvgpu_pr_state *p,
 			struct virtio_gpu_set_scanout *set,
 			struct rvgpu_scanout *s)
@@ -593,6 +651,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 					r.t_h3d.layer_stride,
 					(struct virgl_box *)&r.t_h3d.box,
 					r.t_h3d.offset, NULL, 0);
+				upload_resource(p, &r.t_h3d);
 			} else {
 				errx(1, "Invalid box transfer");
 			}
