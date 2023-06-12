@@ -1,7 +1,7 @@
-#// SPDX-License-Identifier: GPL-2.0
-#/**
-# * Copyright (c) 2022  Panasonic Automotive Systems, Co., Ltd.
-# */
+# SPDX-License-Identifier: GPL-2.0
+#
+# Copyright (c) 2022  Panasonic Automotive Systems, Co., Ltd.
+#
 
 project(virtio-lo-driver VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
