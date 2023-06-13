@@ -1279,14 +1279,6 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 				gpu_device_send_command(b, iov->iov_base,
 							iov->iov_len, true);
 			}
-
-			switch (r.hdr.type) {
-			case VIRTIO_GPU_CMD_UPDATE_CURSOR:
-				break;
-			default:
-			case VIRTIO_GPU_CMD_MOVE_CURSOR:
-				break;
-			}
 		}
 		vqueue_send_response(&g->vq[1], &g->cursor, &resp,
 				     sizeof(resp));
