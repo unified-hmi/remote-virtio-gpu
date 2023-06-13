@@ -97,7 +97,7 @@ struct gpu_capdata {
 
 struct cmd {
 	struct virtio_gpu_ctrl_hdr hdr;
-	struct vqueue_request req;
+	struct vqueue_request *req;
 
 	TAILQ_ENTRY(cmd) cmds;
 };
@@ -128,8 +128,6 @@ struct gpu_device {
 	struct virtio_gpu_config config;
 	pthread_t resource_thread;
 
-	struct vqueue_request ctrl;
-	struct vqueue_request cursor;
 	struct vqueue vq[2];
 	struct rvgpu_backend *backend;
 	struct async_resp *async_resp;
@@ -359,7 +357,7 @@ size_t process_fences(struct gpu_device *g, uint32_t fence_id)
 			continue;
 
 		memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-		vqueue_send_response(&g->vq[0], &cmd->req, &hdr, sizeof(hdr));
+		vqueue_send_response(cmd->req, &hdr, sizeof(hdr));
 		TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 		free(cmd);
 		processed++;
@@ -378,7 +376,7 @@ void add_resp(struct gpu_device *g, struct virtio_gpu_ctrl_hdr *hdr,
 	assert(cmd);
 
 	memcpy(&cmd->hdr, hdr, sizeof(*hdr));
-	memcpy(&cmd->req, req, sizeof(*req));
+	cmd->req = req;
 
 	TAILQ_INSERT_TAIL(&r->async_cmds, cmd, cmds);
 }
@@ -622,8 +620,6 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 		err(1, "add virtio-lo-device");
 
 	g->idx = info.idx;
-	vqueue_init_request(&g->ctrl, q[0].size);
-	vqueue_init_request(&g->cursor, q[1].size);
 
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
@@ -676,8 +672,6 @@ void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
 
-	vqueue_free_request(&g->ctrl);
-	vqueue_free_request(&g->cursor);
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
 
@@ -980,8 +974,7 @@ size_t gpu_device_serve_vsync(struct gpu_device *g)
 	{
 		if (cmd->hdr.flags & VIRTIO_GPU_FLAG_VSYNC) {
 			memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-			vqueue_send_response(&g->vq[0], &cmd->req, &hdr,
-					     sizeof(hdr));
+			vqueue_send_response(cmd->req, &hdr, sizeof(hdr));
 			TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 			free(cmd);
 			processed++;
@@ -1063,16 +1056,25 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		}
 	}
 	kick += gpu_device_serve_fences(g);
-	while (vqueue_get_request(g->lo_fd, &g->vq[0], &g->ctrl)) {
+	while (1) {
+		struct vqueue_request *req;
 		size_t resp_len = sizeof(resp.hdr);
 		union virtio_gpu_cmd r;
 		struct rvgpu_header rhdr = {
-			.size = (uint32_t)iov_size(g->ctrl.r, g->ctrl.nr),
 			.idx = 0,
 			.flags = 0,
 		};
 
-		copy_from_iov(g->ctrl.r, g->ctrl.nr, &r, sizeof(r));
+		if (!vqueue_are_requests_available(&g->vq[0]))
+			break;
+
+		req = vqueue_get_request(g->lo_fd, &g->vq[0]);
+		if (!req)
+			errx(1, "out of memory");
+
+		rhdr.size = (uint32_t)iov_size(req->r, req->nr),
+
+		copy_from_iov(req->r, req->nr, &r, sizeof(r));
 
 		resp.hdr.flags = 0;
 		resp.hdr.fence_id = 0;
@@ -1086,7 +1088,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				resp.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
 				resp.hdr.fence_id = r.hdr.fence_id;
 				resp.hdr.ctx_id = r.hdr.ctx_id;
-				add_resp(g, &resp.hdr, &g->ctrl);
+				add_resp(g, &resp.hdr, vqueue_request_ref(req));
 			}
 
 			if (r.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
@@ -1094,8 +1096,8 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 
 			gpu_device_send_command(b, &rhdr, sizeof(rhdr),
 						notify_all);
-			for (i = 0u; i < g->ctrl.nr; i++) {
-				struct iovec *iov = &g->ctrl.r[i];
+			for (i = 0u; i < req->nr; i++) {
+				struct iovec *iov = &req->r[i];
 
 				gpu_device_send_command(
 					b, iov->iov_base, iov->iov_len, notify_all);
@@ -1153,7 +1155,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				if (r.r_flush.resource_id == g->scanres) {
 					if (gpu_device_read_vsync(g) == 0) {
 						gpu_device_trigger_vsync(
-							g, &resp.hdr, &g->ctrl,
+							g, &resp.hdr, vqueue_request_ref(req),
 							r.hdr.flags, vsync_ts);
 						clock_gettime(CLOCK_REALTIME,
 							      &vsync_ts);
@@ -1218,9 +1220,10 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		}
 		if ((!(resp.hdr.flags & VIRTIO_GPU_FLAG_FENCE)) &&
 		    (!(resp.hdr.flags & VIRTIO_GPU_FLAG_VSYNC))) {
-			vqueue_send_response(&g->vq[0], &g->ctrl, &resp,
-					     resp_len);
+			vqueue_send_response(req, &resp, resp_len);
 			kick++;
+		} else {
+			vqueue_request_unref(req);
 		}
 	}
 	if (kick) {
@@ -1252,17 +1255,26 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
 
-	while (vqueue_get_request(g->lo_fd, &g->vq[1], &g->cursor)) {
+	while (1) {
+		struct vqueue_request *req;
 		union virtio_gpu_cmd r;
 		struct virtio_gpu_ctrl_hdr resp = { .flags = 0, .fence_id = 0 };
-		size_t cmdsize = iov_size(g->cursor.r, g->cursor.nr);
 		struct rvgpu_header rhdr = {
-			.size = (uint32_t)cmdsize,
 			.idx = 0,
 			.flags = RVGPU_CURSOR,
 		};
 
-		copy_from_iov(g->cursor.r, g->cursor.nr, &r, sizeof(r));
+		if (!vqueue_are_requests_available(&g->vq[1]))
+			break;
+
+		req = vqueue_get_request(g->lo_fd, &g->vq[1]);
+		if (!req)
+			errx(1, "out of memory");
+
+		size_t cmdsize = iov_size(req->r, req->nr);
+		rhdr.size = (uint32_t)cmdsize,
+
+		copy_from_iov(req->r, req->nr, &r, sizeof(r));
 
 		resp.type = sanity_check_gpu_cursor(&r, cmdsize, true);
 		if (resp.type == VIRTIO_GPU_RESP_OK_NODATA) {
@@ -1273,15 +1285,14 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 			}
 
 			gpu_device_send_command(b, &rhdr, sizeof(rhdr), true);
-			for (unsigned int i = 0u; i < g->cursor.nr; i++) {
-				struct iovec *iov = &g->cursor.r[i];
+			for (unsigned int i = 0u; i < req->nr; i++) {
+				struct iovec *iov = &req->r[i];
 
 				gpu_device_send_command(b, iov->iov_base,
 							iov->iov_len, true);
 			}
 		}
-		vqueue_send_response(&g->vq[1], &g->cursor, &resp,
-				     sizeof(resp));
+		vqueue_send_response(req, &resp, sizeof(resp));
 		kick = 1;
 	}
 	if (kick) {

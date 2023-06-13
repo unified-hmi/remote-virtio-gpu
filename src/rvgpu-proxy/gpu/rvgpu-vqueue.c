@@ -18,25 +18,53 @@
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <assert.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
 #include <rvgpu-proxy/gpu/rvgpu-map-guest.h>
 #include <rvgpu-proxy/gpu/rvgpu-vqueue.h>
 
-int vqueue_get_request(int vilo, struct vqueue *q, struct vqueue_request *req)
+static struct vqueue_request *vqueue_init_request(void)
 {
-	uint16_t avail_idx = q->vr.avail->idx;
+	struct vqueue_request *req = calloc(1, sizeof(struct vqueue_request));
+
+	if (!req)
+		return NULL;
+
+	req->idx = 0u;
+	req->nr = req->nw = 0u;
+	req->refcount = 1;
+	req->mapped = false;
+
+	return req;
+}
+
+void vqueue_request_unref(struct vqueue_request *req)
+{
+	req->refcount--;
+	if (req->refcount > 0)
+		return;
+
+	assert(!req->mapped);
+	free(req);
+}
+
+struct vqueue_request *vqueue_get_request(int vilo, struct vqueue *q)
+{
+	struct vqueue_request *req;
 	uint16_t didx;
 
-	if (avail_idx == q->last_avail_idx) {
-		/* no more requests available */
-		return 0;
-	}
-	vqueue_init_request(req, 1024);
+	assert(vqueue_are_requests_available(q));
+
+	req = vqueue_init_request();
+	if (!req)
+		return NULL;
+
 	atomic_thread_fence(memory_order_seq_cst);
 	req->idx = q->vr.avail->ring[q->last_avail_idx % q->vr.num];
 	req->nr = 0;
 	req->nw = 0;
+	req->q = q;
 	for (didx = req->idx;;) {
 		struct vring_desc d = q->vr.desc[didx % q->vr.num];
 		struct iovec *iov;
@@ -56,7 +84,7 @@ int vqueue_get_request(int vilo, struct vqueue *q, struct vqueue_request *req)
 		iov->iov_base = map_guest(vilo, d.addr, prot, d.len);
 		if (iov->iov_base != NULL) {
 			(*pn)++;
-			if (*pn >= req->maxnum)
+			if (*pn >= VQUEUE_REQUEST_IOVEC_LEN)
 				break;
 		}
 
@@ -66,12 +94,20 @@ int vqueue_get_request(int vilo, struct vqueue *q, struct vqueue_request *req)
 			break;
 	}
 	q->last_avail_idx++;
-	return 1;
+	req->mapped = true;
+	return req;
 }
 
-static void unmap_request(struct vqueue_request *req)
+void vqueue_send_response(struct vqueue_request *req,
+			  void *resp, size_t resp_len)
 {
+	struct vqueue *q = req->q;
+	uint16_t idx = atomic_load((atomic_ushort *)&q->vr.used->idx);
+	struct vring_used_elem *el = &q->vr.used->ring[idx % q->vr.num];
+	struct timespec barrier_delay = { .tv_nsec = 10 };
 	size_t i;
+
+	resp_len = copy_to_iov(req->w, req->nw, resp, resp_len);
 
 	for (i = 0; i < req->nr; i++)
 		unmap_guest(req->r[i].iov_base, req->r[i].iov_len);
@@ -79,18 +115,7 @@ static void unmap_request(struct vqueue_request *req)
 	for (i = 0; i < req->nw; i++)
 		unmap_guest(req->w[i].iov_base, req->w[i].iov_len);
 
-	req->nr = req->nw = 0;
-}
-
-void vqueue_send_response(struct vqueue *q, struct vqueue_request *req,
-			  void *resp, size_t resp_len)
-{
-	uint16_t idx = atomic_load((atomic_ushort *)&q->vr.used->idx);
-	struct vring_used_elem *el = &q->vr.used->ring[idx % q->vr.num];
-	struct timespec barrier_delay = { .tv_nsec = 10 };
-
-	resp_len = copy_to_iov(req->w, req->nw, resp, resp_len);
-	unmap_request(req);
+	req->mapped = false;
 
 	/* FIXME: Without this delay, kernel crashes in virtio-gpu driver
 	 * most probable cause is race condition.
@@ -102,28 +127,5 @@ void vqueue_send_response(struct vqueue *q, struct vqueue_request *req,
 	atomic_store((atomic_uint *)&el->id, req->idx);
 	idx++;
 	atomic_store((atomic_ushort *)&q->vr.used->idx, idx);
-	vqueue_free_request(req);
-}
-
-int vqueue_init_request(struct vqueue_request *req, size_t maxnum)
-{
-	req->r = calloc(maxnum, sizeof(struct iovec));
-	req->w = calloc(maxnum, sizeof(struct iovec));
-	req->maxnum = maxnum;
-	req->idx = 0u;
-	req->nr = req->nw = 0u;
-	if (!req->r || !req->w) {
-		free(req->r);
-		free(req->w);
-		return -1;
-	}
-	return 0;
-}
-
-void vqueue_free_request(struct vqueue_request *req)
-{
-	free(req->r);
-	free(req->w);
-	req->r = NULL;
-	req->w = NULL;
+	vqueue_request_unref(req);
 }
