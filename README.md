@@ -70,8 +70,8 @@ following steps:
                  libxml2-dev meson libxkbcommon-x11-dev libpixman-1-dev libinput-dev libdrm-dev wayland-protocols libcairo2-dev \
                  libpango1.0-dev libdbus-1-dev libgbm-dev libxcursor-dev
 
-  wget https://github.com/wayland-project/weston/archive/8.0.93.tar.gz
-  tar -xf 8.0.93.tar.gz
+  wget https://wayland.freedesktop.org/releases/weston-8.0.93.tar.xz
+  tar -xf weston-8.0.93.tar.xz
   cd ~/weston-8.0.93/
   meson build/
   ninja -C build/ install
