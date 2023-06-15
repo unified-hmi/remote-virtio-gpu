@@ -252,10 +252,8 @@ int main(int argc, char **argv)
 	dev = gpu_device_init(lo_fd, epoll_fd, PROXY_GPU_CONFIG,
 			      PROXY_GPU_QUEUES, capset, &params, rvgpu_be);
 
-	if (!dev) {
-		input_device_free(inpdev);
+	if (!dev)
 		err(1, "gpu device init");
-	}
 
 	inpdev = input_device_init(rvgpu_be);
 	if (!inpdev)
