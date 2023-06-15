@@ -346,7 +346,6 @@ static void gpu_capset_init(struct gpu_device *g, int capset)
 size_t process_fences(struct gpu_device *g, uint32_t fence_id)
 {
 	struct async_resp *r = g->async_resp;
-	struct virtio_gpu_ctrl_hdr hdr;
 	struct cmd *cmd;
 	size_t processed = 0;
 
@@ -356,8 +355,7 @@ size_t process_fences(struct gpu_device *g, uint32_t fence_id)
 		    (cmd->hdr.flags & VIRTIO_GPU_FLAG_VSYNC))
 			continue;
 
-		memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-		vqueue_send_response(cmd->req, &hdr, sizeof(hdr));
+		vqueue_send_response(cmd->req, &cmd->hdr, sizeof(cmd->hdr));
 		TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 		free(cmd);
 		processed++;
@@ -966,15 +964,13 @@ static void set_timer(int timerfd, unsigned long framerate,
 size_t gpu_device_serve_vsync(struct gpu_device *g)
 {
 	struct async_resp *r = g->async_resp;
-	struct virtio_gpu_ctrl_hdr hdr;
 	struct cmd *cmd;
 	size_t processed = 0;
 
 	TAILQ_FOREACH(cmd, &r->async_cmds, cmds)
 	{
 		if (cmd->hdr.flags & VIRTIO_GPU_FLAG_VSYNC) {
-			memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-			vqueue_send_response(cmd->req, &hdr, sizeof(hdr));
+			vqueue_send_response(cmd->req, &cmd->hdr, sizeof(cmd->hdr));
 			TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 			free(cmd);
 			processed++;
