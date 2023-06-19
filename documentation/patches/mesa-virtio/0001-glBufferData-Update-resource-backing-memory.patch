@@ -11,11 +11,11 @@ The problem is in the following use-case:
 1) glBufferData --- reserves guest memory "backing" for resource,
 but doesn't fill it with data. Instead, data is serialized into
 virgl internal command and sent using VIRTIO_GPU_CMD_SUBMIT_3D
-comand. This command is opaque for rproxy/rvdds and serialized cmd buffer
+comand. This command is opaque for rvgpu-proxy/rvgpu-renderer and serialized cmd buffer
 is just forwarded to virglrenderer, where it is deserialized and
 used for initialization of internal "gpu" memory with this data.
-2) glMapBuffer --- this calls TRANSFER_FROM_HOST_3D, which asks host/rproxy-->
-rvdds/virglrenderer to update backing memory (on source) with buffer data.
+2) glMapBuffer --- this calls TRANSFER_FROM_HOST_3D, which asks host/rvgpu-proxy-->
+rvgpu-renderer/virglrenderer to update backing memory (on source) with buffer data.
 And further this backing memory is mapped to guest application.
 In case of UHMI, TRANSFER_FROM_HOST_3D is not implemented, thus the memory is
 not "initialized".
