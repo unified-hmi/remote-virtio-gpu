@@ -165,24 +165,20 @@ struct rvgpu_rendering_backend_ops {
 
 struct rvgpu_scanout {
 	uint32_t scanout_id;
-	union {
-		struct {
-			struct rvgpu_rendering_backend_ops ops;
-		} plugin_v1;
-	};
+	struct {
+		struct rvgpu_rendering_backend_ops ops;
+	} plugin_v1;
 	void *priv;
 };
 
 struct rvgpu_backend {
 	void *lib_handle;
 	uint32_t plugin_version;
-	union {
-		struct {
-			struct rvgpu_rendering_ctx_ops ops;
-			struct rvgpu_ctx ctx;
-			struct rvgpu_scanout scanout[MAX_HOSTS];
-		} plugin_v1;
-	};
+	struct {
+		struct rvgpu_rendering_ctx_ops ops;
+		struct rvgpu_ctx ctx;
+		struct rvgpu_scanout scanout[MAX_HOSTS];
+	} plugin_v1;
 };
 
 #endif /* RVGPU_PLUGIN */
