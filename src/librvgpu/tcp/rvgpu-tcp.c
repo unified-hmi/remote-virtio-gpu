@@ -114,6 +114,7 @@ static int wait_scanouts_init(struct ctx_priv *ctx)
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	end.tv_sec += timeo_sec;
 
+	/* FIXME: wow, busy wait!!! */
 	do {
 		struct timespec now;
 
