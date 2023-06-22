@@ -65,16 +65,7 @@ following steps:
 - Install Weston compositor
 
   ```
-  sudo apt install libjpeg-dev libwebp-dev libsystemd-dev libpam-dev libva-dev freerdp2-dev \
-                 libxcb-composite0-dev liblcms2-dev libcolord-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.2-dev \
-                 libxml2-dev meson libxkbcommon-x11-dev libpixman-1-dev libinput-dev libdrm-dev wayland-protocols libcairo2-dev \
-                 libpango1.0-dev libdbus-1-dev libgbm-dev libxcursor-dev
-
-  wget https://wayland.freedesktop.org/releases/weston-8.0.93.tar.xz
-  tar -xf weston-8.0.93.tar.xz
-  cd ~/weston-8.0.93/
-  meson build/
-  ninja -C build/ install
+  sudo apt install weston
   ```
 
 - Install remote-virtio-gpu
