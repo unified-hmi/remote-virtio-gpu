@@ -50,55 +50,59 @@ struct conninfo {
 
 static int reconnect_single(struct vgpu_host *host);
 
-static void reconnect_next(struct conninfo *ci, struct pollfd *pfd)
+static int reconnect_next(struct conninfo *ci)
 {
+	int fd;
+
 	if (ci->p != NULL)
 		ci->p = ci->p->ai_next;
 
 	if (ci->p == NULL)
 		ci->p = ci->servinfo;
 
-	pfd->fd = socket(ci->p->ai_family, ci->p->ai_socktype | SOCK_NONBLOCK,
-			 ci->p->ai_protocol);
-	if (pfd->fd == -1)
-		return;
+	fd = socket(ci->p->ai_family, ci->p->ai_socktype | SOCK_NONBLOCK,
+		    ci->p->ai_protocol);
+	if (fd == -1)
+		return -1;
 
 	int keepalive = 1;
 
-	if (setsockopt(pfd->fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
+	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt SO_KEEPALIVE");
 
 	int keepidle = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPIDLE, &keepidle,
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &keepidle,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPIDLE");
 
 	int keepintvl = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl,
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPINTVL");
 
 	int keepcnt = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) !=
-	    0)
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &keepcnt,
+		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPCNT");
 
 	int nodelay = 1;
 
-	if (setsockopt(pfd->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay,
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
 		       sizeof(int)) != 0) {
 		err(1, "setsockopt TCP_NODELAY");
 	}
 
-	if (connect(pfd->fd, ci->p->ai_addr, ci->p->ai_addrlen) != -1 ||
+	if (connect(fd, ci->p->ai_addr, ci->p->ai_addrlen) != -1 ||
 	    errno != EINPROGRESS) {
-		close(pfd->fd);
-		pfd->fd = -1;
+		close(fd);
+		fd = -1;
 	}
+
+	return fd;
 }
 
 static int wait_scanouts_init(struct ctx_priv *ctx)
@@ -152,7 +156,7 @@ static void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo
 			warnx("getaddrinfo %s", gai_strerror(res));
 			continue;
 		}
-		reconnect_next(&cinfo[i], &pfds[i]);
+		pfds[i].fd = reconnect_next(&cinfo[i]);
 	}
 
 	do {
@@ -183,7 +187,7 @@ static void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo
 					pfds[i].fd = -1;
 				} else {
 					close(pfds[i].fd);
-					reconnect_next(&cinfo[i], &pfds[i]);
+					pfds[i].fd = reconnect_next(&cinfo[i]);
 					wait_more = true;
 				}
 			} else {
@@ -225,7 +229,7 @@ static int reconnect_single(struct vgpu_host *host)
 		.events = POLLOUT,
 	};
 
-	reconnect_next(&cinfo, &pfd);
+	pfd.fd = reconnect_next(&cinfo);
 
 	poll(&pfd, 1, 10);
 
