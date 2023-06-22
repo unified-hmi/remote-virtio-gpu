@@ -348,7 +348,8 @@ static void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	ctx_priv->reset.state = GPU_RESET_NONE;
 	if (ctx_priv->gpu_reset_cb)
 		ctx_priv->gpu_reset_cb(ctx, GPU_RESET_NONE);
-	/* FIXME: Without this delay, rvgpu-proxy will not
+	/*
+	 * FIXME: Without this delay, rvgpu-proxy will not
 	 * wait for subscriber creation in rvgpu-renderer. This
 	 * may lead rvgpu-renderer to miss resources from rvgpu-proxy.
 	 */
@@ -408,7 +409,8 @@ static unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
 			  struct pollfd **res_pipe)
 {
 	unsigned int pfd_count = 0;
-	/* set pointers as following. Ex: for 2 targets
+	/*
+	 * set pointers as following. Ex: for 2 targets
 	 * 0 - session timer
 	 * 1 - recconnect timer
 	 * 2 - command host 0
@@ -590,9 +592,7 @@ static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
 
-	/*
-     * Handle Virtio-GPU commands
-     */
+	/* Handle Virtio-GPU commands */
 	for (int i = 0; i < cmd_count; i++) {
 		if (p_entry->cmd_pipe_in[i].revents & POLLIN) {
 			p_entry->cmd_pipe_in[i].events &= ~POLLIN;
@@ -617,9 +617,7 @@ static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 		}
 	}
 
-	/*
-     * Handle resources and fences
-     */
+	/* Handle resources and fences */
 	for (int i = 0; i < res_count; i++) {
 		if (p_entry->res_pipe_in[i].revents & POLLIN) {
 			p_entry->res_pipe_in[i].events &= ~POLLIN;
