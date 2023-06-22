@@ -53,22 +53,34 @@ following steps:
 - Install build tools
 
   ```
-  sudo apt install gcc g++ make cmake
+  sudo apt install gcc make cmake pkg-config
   ```
 
-- Install virglrenderer
+- Install mesa development libraries
 
   ```
-  sudo apt install libvirglrenderer1 libvirglrenderer-dev
+  sudo apt install libdrm-dev libgbm-dev libegl-dev libgles-dev
   ```
 
-- Install Weston compositor
+- Install virglrenderer development libraries
 
   ```
-  sudo apt install weston
+  sudo apt install libvirglrenderer-dev
   ```
 
-- Install remote-virtio-gpu
+- Install Wayland development libraries
+
+  ```
+  sudo apt install libwayland-dev
+  ```
+
+- Install libinput development libraries
+
+  ```
+  sudo apt install libinput-dev
+  ```
+
+- Build and install remote-virtio-gpu
 
   ```
   cd ~/remote-virtio-gpu
@@ -76,25 +88,6 @@ following steps:
   cmake -B build -DCMAKE_BUILD_TYPE=Release -DVIRTIO_LO_DIR=../rvgpu-driver-linux
   make -C build
   sudo make install -C build
-  ```
-
-- Install mesa 18.2.0 with virgl support to a separate /usr/lib/mesa-virtio folder
-
-  ```
-  sudo apt install llvm libwayland-egl-backend-dev libxcb-glx0-dev libx11-xcb-dev libxcb-dri2-0-dev libxcb-dri3-dev \
-                 libxcb-present-dev libxshmfence-dev libgbm-dev \
-                 libsdl2-dev libgtk-3-dev libgles2-mesa-dev libpixman-1-dev \
-                 libtool autoconf libdrm-dev python libinput-dev glmark2-es2-wayland
-
-  wget https://archive.mesa3d.org//mesa-18.2.0.tar.xz
-  tar -xf mesa-18.2.0.tar.xz
-  cd ~/mesa-18.2.0/
-  patch -p1 < ../remote-virtio-gpu/documentation/patches/mesa-virtio/0001-glBufferData-Update-resource-backing-memory.patch
-  ./configure --prefix=/usr/lib/mesa-virtio --exec_prefix=/usr/lib/mesa-virtio --libdir=/usr/lib/mesa-virtio \
-            --includedir=/usr/include/mesa-virtio --sysconfdir=/etc/mesa-virtio --datadir=/usr/share/mesa-virtio \
-            --with-dri-drivers=swrast --with-gallium-drivers=swrast,virgl --enable-dri3=yes --with-platforms=drm,wayland,x11 --disable-glx
-  make
-  sudo make install
   ```
 
 ## How to run RVGPU locally
@@ -111,6 +104,12 @@ Run both RVGPU client (**rvgpu-proxy**) and server (**rvgpu-renderer**) on the s
   rvgpu-renderer -b 1280x720@0,0 -p 55667 &
   ```
 
+- Install Weston
+
+  ```
+  sudo apt install weston
+  ```
+
 - Open another terminal and switch to **root** user
 
   ```
@@ -122,7 +121,6 @@ Run both RVGPU client (**rvgpu-proxy**) and server (**rvgpu-renderer**) on the s
   export XDG_RUNTIME_DIR=/run/user/0
   rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667 &
 
-  export LD_LIBRARY_PATH=/usr/lib/mesa-virtio
   weston --backend drm-backend.so --tty=2 --seat=seat_virtual -i 0 &
   ```
 
@@ -173,7 +171,7 @@ Here, the build instructions described to support the VSYNC feature to the kerne
 - Make sure the Kernel is updated after reboot. Check Kernel version:
   ```
   uname -r
-   ```
+  ```
    
 ## How to run RVGPU remotely
 
