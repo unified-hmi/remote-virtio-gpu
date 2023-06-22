@@ -110,9 +110,7 @@ enum rvgpu_res_message_type {
  */
 struct rvgpu_res_message_header {
 	uint8_t type; /**< type of resource socket message */
-	union {
-		uint32_t fence_id; /**< fence identificator */
-	};
+	uint32_t fence_id; /**< fence identificator */
 };
 
 /**
