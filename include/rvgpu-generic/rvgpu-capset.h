@@ -18,6 +18,8 @@
 #ifndef RVGPU_CAPSET_H
 #define RVGPU_CAPSET_H
 
+#define CAPSET_MAX_SIZE 2048
+
 struct capset {
 	uint32_t id;
 	uint32_t version;

@@ -431,23 +431,34 @@ static void clear_scanout(struct rvgpu_pr_state *p, struct rvgpu_scanout *s)
 
 static void dump_capset(struct rvgpu_pr_state *p)
 {
-	for (unsigned int id = 1;; id++) {
+	/*
+	 * First argument for virgl_renderer_get_cap_set()
+	 * is for backend id, we support only
+	 * VIRTIO_GPU_CAPSET_VIRGL (== 1)
+	 * but let's also dump
+	 * VIRTIO_GPU_CAPSET_VIRGL2 (== 2)
+	 * to be ready to move to the next version.
+	 */
+	uint32_t ids[] = {VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2};
+	long unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ids) ; i++) {
 		uint32_t maxver, maxsize;
 
-		virgl_renderer_get_cap_set(id, &maxver, &maxsize);
-		if (maxsize == 0 || maxsize >= 1024) {
-			warnx("Error while getting capset %u", id);
+		virgl_renderer_get_cap_set(ids[i], &maxver, &maxsize);
+		if (maxsize == 0 || maxsize >= CAPSET_MAX_SIZE) {
+			warnx("Error while getting capset %u (maxsize=%u)", ids[i], maxsize);
 			break;
 		}
 
-		for (unsigned int version = 1; version <= maxver; version++) {
-			struct capset hdr = { .id = id,
+		for (unsigned int version = 0; version <= maxver; version++) {
+			struct capset hdr = { .id = ids[i],
 					      .version = version,
 					      .size = maxsize };
-			uint8_t data[1024];
+			static uint8_t data[CAPSET_MAX_SIZE];
 
 			memset(data, 0, maxsize);
-			virgl_renderer_fill_caps(id, version, data);
+			virgl_renderer_fill_caps(ids[i], version, data);
 			hdr.size = maxsize;
 
 			if (fwrite(&hdr, sizeof(hdr), 1, p->pp.capset) != 1)
@@ -456,7 +467,7 @@ static void dump_capset(struct rvgpu_pr_state *p)
 			if (fwrite(data, maxsize, 1, p->pp.capset) != 1)
 				warn("Error while dumping capset");
 
-			warnx("capset dumped for id %u version %u size %u", id,
+			warnx("capset dumped for id %u version %u size %u", ids[i],
 			      version, maxsize);
 		}
 	}
