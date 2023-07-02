@@ -19,10 +19,13 @@
 
 ## Contents
 
-- [Repository structure](#repository-structure)
-- [Build instructions](#build-instructions)
-- [HowTo run RVGPU locally](#how-to-run-rvgpu-locally)
-- [HowTo run RVGPU remotely](#how-to-run-rvgpu-remotely)
+- [Remote Virtio GPU Device (RVGPU)](#remote-virtio-gpu-device-rvgpu)
+  - [Contents](#contents)
+  - [Repository structure](#repository-structure)
+  - [Build instructions](#build-instructions)
+  - [How to run RVGPU locally](#how-to-run-rvgpu-locally)
+  - [How to run RVGPU remotely](#how-to-run-rvgpu-remotely)
+  - [Capsets](#capsets)
 
 
 ## Repository structure
@@ -183,3 +186,12 @@ rvgpu-renderer is listening to **rvgpu-proxy** through "-n" option.
 **Note**  
 Some graphical applications generate much network traffic. It is recommended to Configure the network to 1Gbps speed.
 
+## Capsets
+
+Sometimes the software does not work because the provided `virgl.capset` file does not specifies
+the capset of the rendering side.  It may maniest in black window.
+In this case:
+
+- Run `rvgpu-renderer` with `-c virgl.capset.new` option.
+- Run `rvgpu-proxy` with the default old capset.
+- Kill proxy and use the capset written by rvgpu-renderer for the next invocations of proxy.
