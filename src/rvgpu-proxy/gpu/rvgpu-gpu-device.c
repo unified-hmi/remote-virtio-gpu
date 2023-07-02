@@ -92,7 +92,7 @@
 
 struct gpu_capdata {
 	struct capset hdr;
-	uint8_t data[1024];
+	uint8_t data[CAPSET_MAX_SIZE];
 };
 
 struct cmd {
@@ -324,23 +324,31 @@ static void gpu_capset_init(struct gpu_device *g, int capset)
 	for (i = 0u; i < GPU_MAX_CAPDATA; i++) {
 		struct gpu_capdata *c = &g->capdata[i];
 
-		if (read(capset, &c->hdr, sizeof(c->hdr)) !=
-		    (ssize_t)sizeof(c->hdr))
-			break;
+		while (1) {
 
-		if (c->hdr.size > sizeof(c->data)) {
-			warnx("too long capset");
-			break;
+			if (read(capset, &c->hdr, sizeof(c->hdr)) !=
+			    (ssize_t)sizeof(c->hdr))
+				goto done;
+
+			if (c->hdr.size > sizeof(c->data)) {
+				warnx("too long capset");
+				goto done;
+			}
+
+			if (read(capset, c->data, c->hdr.size) !=
+			    (ssize_t)c->hdr.size) {
+				warn("cannot read capset data");
+				goto done;
+			}
+
+			if (c->hdr.id == 1)
+				break;
 		}
-		if (read(capset, c->data, c->hdr.size) !=
-		    (ssize_t)c->hdr.size) {
-			warn("cannot read capset data");
-			break;
-		}
-		if (c->hdr.id > g->config.num_capsets)
-			g->config.num_capsets = c->hdr.id;
 	}
+
+done:
 	g->ncapdata = i;
+	g->config.num_capsets = i;
 }
 
 size_t process_fences(struct gpu_device *g, uint32_t fence_id)
@@ -838,68 +846,33 @@ static unsigned int gpu_device_detach(struct gpu_device *g, unsigned int resid)
 	return VIRTIO_GPU_RESP_OK_NODATA;
 }
 
-static void gpu_device_capset_info(struct gpu_device *g, unsigned int index,
-				   struct virtio_gpu_resp_capset_info *ci)
+static unsigned int gpu_device_capset_info(struct gpu_device *g, unsigned int index,
+					   struct virtio_gpu_resp_capset_info *ci)
 {
-	ci->capset_id = 0u;
-	ci->capset_max_version = 0u;
-	ci->capset_max_size = 0u;
-
-	for (size_t i = 0u; i < g->ncapdata; i++) {
-		const struct gpu_capdata *c = &g->capdata[i];
-
-		if ((index + 1) == c->hdr.id) {
-			ci->capset_id = c->hdr.id;
-			if (c->hdr.version > ci->capset_max_version)
-				ci->capset_max_version = c->hdr.version;
-
-			if (c->hdr.size > ci->capset_max_size)
-				ci->capset_max_size = c->hdr.size;
-		}
-	}
-}
-
-static struct gpu_capdata *gpu_device_find_capset(struct gpu_device *g,
-						  unsigned int capset_id,
-						  unsigned int capset_version)
-{
-	if (capset_version) {
-		for (size_t i = 0u; i < g->ncapdata; i++) {
-			struct gpu_capdata *cd = &g->capdata[i];
-
-			if (capset_id == cd->hdr.id &&
-			    capset_version == cd->hdr.version) {
-				return cd;
-			}
-		}
+	if (index < g->ncapdata) {
+		const struct gpu_capdata *c = g->capdata + index;
+		ci->capset_id = c->hdr.id;
+		ci->capset_max_version = c->hdr.version;
+		ci->capset_max_size = c->hdr.size;
+		return VIRTIO_GPU_RESP_OK_CAPSET_INFO;
 	} else {
-		struct gpu_capdata *cp = NULL;
-		uint32_t version = 0u;
-
-		for (size_t i = 0u; i < g->ncapdata; i++) {
-			struct gpu_capdata *cd = &g->capdata[i];
-
-			if (capset_id == cd->hdr.id &&
-			    cd->hdr.version > version) {
-				version = cd->hdr.version;
-				cp = cd;
-			}
-		}
-		return cp;
+		return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
 	}
-	return NULL;
 }
 
 static size_t gpu_device_capset(struct gpu_device *g, unsigned int capset_id,
 				unsigned int capset_version,
 				struct virtio_gpu_resp_capset *c)
 {
-	struct gpu_capdata *cd =
-		gpu_device_find_capset(g, capset_id, capset_version);
-	if (cd) {
-		c->hdr.type = VIRTIO_GPU_RESP_OK_CAPSET;
-		memcpy(c->capset_data, cd->data, cd->hdr.size);
-		return sizeof(*c) + cd->hdr.size;
+	size_t i;
+
+	for (i = 0; i < g->ncapdata; i++) {
+		const struct gpu_capdata *cd = g->capdata + i;
+		if (cd->hdr.id == capset_id && cd->hdr.version == capset_version) {
+			memcpy(c->capset_data, cd->data, cd->hdr.size);
+			c->hdr.type = VIRTIO_GPU_RESP_OK_CAPSET;
+			return sizeof(*c) + cd->hdr.size;
+		}
 	}
 
 	c->hdr.type = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
@@ -1195,10 +1168,9 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 					g, r.r_det.resource_id);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET_INFO:
-				gpu_device_capset_info(
+				resp.hdr.type = gpu_device_capset_info(
 					g, r.capset_info.capset_index,
 					&resp.ci);
-				resp.hdr.type = VIRTIO_GPU_RESP_OK_CAPSET_INFO;
 				resp_len = sizeof(resp.ci);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET:
