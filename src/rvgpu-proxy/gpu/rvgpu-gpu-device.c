@@ -934,7 +934,7 @@ static void set_timer(int timerfd, unsigned long framerate,
 		fprintf(stderr, "Failed to set timerfd: %s\n", strerror(errno));
 }
 
-size_t gpu_device_serve_vsync(struct gpu_device *g)
+static size_t gpu_device_serve_vsync(struct gpu_device *g)
 {
 	struct async_resp *r = g->async_resp;
 	struct cmd *cmd;
