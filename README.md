@@ -133,6 +133,8 @@ some other graphical application to verify that everything works.
 
 **Note**  
 To support the VSYNC feature in rvgpu-proxy, apply and rebuild the Linux kernel with the following path remote-virtio-gpu/documentation/patches/kernel
+The patches could be applied to the linux kernel with versions before 5.15.
+The software still could be compiled or run on the recent kernels without support for VSYNC feature.
 
 Get the Linux kernel souce code, which must be compatible with your Linux distro, use the patch file corresponding with kernel version you get for performing build and generate the necessary deb files
 

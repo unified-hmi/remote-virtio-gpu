@@ -31,6 +31,7 @@
 #include <sys/poll.h>
 #include <sys/queue.h>
 #include <sys/timerfd.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -38,6 +39,7 @@
 #include <linux/virtio_gpu.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_lo.h>
+#include <linux/version.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
@@ -65,6 +67,38 @@
 #endif
 
 #define VERSION_SYMBOL_NAME "rvgpu_backend_version"
+
+/*
+ * The commit 34268c9dde4 from linux kernel changes virtio_gpu_ctrl_hdr
+ * that is used by UHMI to implement vsync.
+ * Check if we are compiled with old enough kernel.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
+# define VSYNC_ENABLE
+#endif
+
+#ifdef VSYNC_ENABLE
+/* Check if we are being ran on old enough kernel */
+static bool ok_to_use_vsync(void)
+{
+	struct utsname buffer;
+	unsigned int major;
+	unsigned int minor;
+	int ret;
+
+	if (uname(&buffer) != 0)
+		err(1, "uname() errror");
+
+	ret = sscanf(buffer.release, "%u.%u", &major, &minor);
+	if (ret != 2)
+		errx(1, "can not parse kernel release");
+
+	if (major == 5)
+		return minor < 15;
+
+	return major < 5;
+}
+#endif
 
 #define GPU_BE_FIND_PLUGIN_VERSION(ver)                                        \
 	do {                                                                   \
@@ -111,7 +145,12 @@ struct gpu_device {
 	int lo_fd;
 	int config_fd;
 	int kick_fd;
+
+#ifdef VSYNC_ENABLE
 	int vsync_fd;
+	int wait_vsync;
+#endif
+
 
 	size_t max_mem;
 	size_t curr_mem;
@@ -119,7 +158,6 @@ struct gpu_device {
 
 	uint32_t scanres;
 	uint32_t scan_id;
-	int wait_vsync;
 
 	unsigned int idx;
 	struct gpu_capdata capdata[GPU_MAX_CAPDATA];
@@ -641,7 +679,8 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 						       q[i].size * 8u + 6u);
 	}
 
-	if (params->framerate) {
+#ifdef VSYNC_ENABLE
+	if (params->framerate && ok_to_use_vsync()) {
 		g->vsync_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
 		if (g->vsync_fd == -1)
 			err(1, "timerfd_create");
@@ -650,8 +689,14 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 			  &(struct epoll_event){ .events = EPOLLIN | EPOLLET,
 						 .data = { .u32 = PROXY_GPU_QUEUES } });
 	} else {
+		if (params->framerate)
+			warnx("binary is running on the kernel version that can not support vsync");
 		g->vsync_fd = -1;
 	}
+#else
+	if (params->framerate)
+		warnx("binary was compiled for the kernel version that can not support vsync");
+#endif
 
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->config_fd,
 		  &(struct epoll_event){ .events = EPOLLIN,
@@ -686,7 +731,9 @@ void gpu_device_free(struct gpu_device *g)
 		unmap_guest(vr->used, vr->num * 8u + 6u);
 	}
 
+#ifdef VSYNC_ENABLE
 	close(g->vsync_fd);
+#endif
 	close(g->config_fd);
 	close(g->kick_fd);
 	if (g->backend)
@@ -879,30 +926,13 @@ static size_t gpu_device_capset(struct gpu_device *g, unsigned int capset_id,
 	return sizeof(c->hdr);
 }
 
-static uint64_t gpu_device_read_vsync(struct gpu_device *g)
-{
-	uint64_t res = 0;
-	ssize_t n;
-
-	if (g->vsync_fd == -1)
-		return 1;
-
-	n = read(g->vsync_fd, &res, sizeof(res));
-
-	if (n == -1 && errno == EAGAIN)
-		res = 0u;
-	else if (n != (ssize_t)sizeof(res))
-		err(1, "Invalid vsync read");
-
-	return res;
-}
-
 void backend_reset_state(struct rvgpu_ctx *ctx, enum reset_state state)
 {
 	(void)ctx;
 	gpu_reset_state = state;
 }
 
+#ifdef VSYNC_ENABLE
 static unsigned long delta_time_nsec(struct timespec start,
 				     struct timespec stop)
 {
@@ -934,6 +964,24 @@ static void set_timer(int timerfd, unsigned long framerate,
 		fprintf(stderr, "Failed to set timerfd: %s\n", strerror(errno));
 }
 
+static uint64_t gpu_device_read_vsync(struct gpu_device *g)
+{
+	uint64_t res = 0;
+	ssize_t n;
+
+	if (g->vsync_fd == -1)
+		return 1;
+
+	n = read(g->vsync_fd, &res, sizeof(res));
+
+	if (n == -1 && errno == EAGAIN)
+		res = 0u;
+	else if (n != (ssize_t)sizeof(res))
+		err(1, "Invalid vsync read");
+
+	return res;
+}
+
 static size_t gpu_device_serve_vsync(struct gpu_device *g)
 {
 	struct async_resp *r = g->async_resp;
@@ -947,29 +995,6 @@ static size_t gpu_device_serve_vsync(struct gpu_device *g)
 			TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 			free(cmd);
 			processed++;
-		}
-	}
-	return processed;
-}
-
-static int gpu_device_serve_fences(struct gpu_device *g)
-{
-	struct async_resp *r = g->async_resp;
-	struct pollfd pfd;
-	int processed = 0;
-	uint32_t fence_id;
-
-	pfd.fd = r->fence_pipe[PIPE_READ];
-	pfd.events = POLLIN;
-
-	while (poll(&pfd, 1, 0) > 0) {
-		if (pfd.revents & POLLIN) {
-			int rc = read_all(r->fence_pipe[PIPE_READ], &fence_id,
-					  sizeof(fence_id));
-			if (rc != sizeof(fence_id))
-				warnx("read error: %d", rc);
-
-			processed += process_fences(g, fence_id);
 		}
 	}
 	return processed;
@@ -1001,13 +1026,36 @@ static void gpu_device_trigger_vsync(struct gpu_device *g,
 
 	g->wait_vsync = 1;
 }
+#endif
+
+static int gpu_device_serve_fences(struct gpu_device *g)
+{
+	struct async_resp *r = g->async_resp;
+	struct pollfd pfd;
+	int processed = 0;
+	uint32_t fence_id;
+
+	pfd.fd = r->fence_pipe[PIPE_READ];
+	pfd.events = POLLIN;
+
+	while (poll(&pfd, 1, 0) > 0) {
+		if (pfd.revents & POLLIN) {
+			int rc = read_all(r->fence_pipe[PIPE_READ], &fence_id,
+					  sizeof(fence_id));
+			if (rc != sizeof(fence_id))
+				warnx("read error: %d", rc);
+
+			processed += process_fences(g, fence_id);
+		}
+	}
+	return processed;
+}
 
 static void gpu_device_serve_ctrl(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
 	static bool reset;
-	static struct timespec vsync_ts;
 
 	union {
 		struct virtio_gpu_ctrl_hdr hdr;
@@ -1017,6 +1065,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		uint8_t data[4096];
 	} resp;
 	memset(&resp.hdr, 0, sizeof(resp.hdr));
+#ifdef VSYNC_ENABLE
 	if (g->wait_vsync) {
 		if (gpu_device_read_vsync(g) > 0u) {
 			g->wait_vsync = 0;
@@ -1024,6 +1073,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 			set_timer(g->vsync_fd, 0, 0);
 		}
 	}
+#endif
 	kick += gpu_device_serve_fences(g);
 	while (1) {
 		struct vqueue_request *req;
@@ -1121,6 +1171,8 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				g->scan_id = r.s_set.scanout_id;
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+#ifdef VSYNC_ENABLE
+				static struct timespec vsync_ts;
 				if (r.r_flush.resource_id == g->scanres) {
 					if (gpu_device_read_vsync(g) == 0) {
 						gpu_device_trigger_vsync(
@@ -1130,6 +1182,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 							      &vsync_ts);
 					}
 				}
+#endif
 				break;
 			case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 				resp.hdr.type = gpu_device_send_res(
