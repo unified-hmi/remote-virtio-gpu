@@ -132,7 +132,7 @@ via localhost by **rvgpu-proxy**. Now you can launch glmark2-es2-wayland or
 some other graphical application to verify that everything works.
 
 **Note**  
-To support the VSYNC feature in rvgpu-proxy, apply and rebuild the Linux kernel with the following path remote-virtio-gpu/documentation/patches/kernel
+To support the VSYNC feature in rvgpu-proxy, apply and rebuild the Linux kernel with the following path remote-virtio-gpu/documentation/patches/kernel.
 The patches could be applied to the linux kernel with versions before 5.15.
 The software still could be compiled or run on the recent kernels without support for VSYNC feature.
 
@@ -190,10 +190,10 @@ Some graphical applications generate much network traffic. It is recommended to 
 
 ## Capsets
 
-Sometimes the software does not work because the provided `virgl.capset` file does not specifies
-the capset of the rendering side.  It may maniest in black window.
+Sometimes the software does not work because the provided `virgl.capset` file does not specify
+the capset of the rendering side.  It may manifest in black window.
 In this case:
 
 - Run `rvgpu-renderer` with `-c virgl.capset.new` option.
-- Run `rvgpu-proxy` with the default old capset.
-- Kill proxy and use the capset written by rvgpu-renderer for the next invocations of proxy.
+- Run `rvgpu-proxy` with the the default old capset.
+- Kill the proxy and use the capset written by `rvgpu-renderer` for the next invocations of proxy.
