@@ -1172,8 +1172,8 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
 #ifdef VSYNC_ENABLE
-				static struct timespec vsync_ts;
 				if (r.r_flush.resource_id == g->scanres) {
+					static struct timespec vsync_ts;
 					if (gpu_device_read_vsync(g) == 0) {
 						gpu_device_trigger_vsync(
 							g, &resp.hdr, vqueue_request_ref(req),
