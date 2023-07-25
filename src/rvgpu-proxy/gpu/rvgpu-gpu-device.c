@@ -37,7 +37,7 @@
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
 #include <linux/virtio_ids.h>
-#include <linux/virtio_lo.h>
+#include <remote-virtio-gpu/virtio_lo.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
