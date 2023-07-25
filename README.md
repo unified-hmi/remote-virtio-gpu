@@ -82,7 +82,7 @@ following steps:
   ```
   cd ~/remote-virtio-gpu
   mkdir build
-  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVIRTIO_LO_DIR=../rvgpu-driver-linux
+  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVIRTIO_LO_DIR={$remote-virtio-gpu-driver}/src/rvgpu-driver-linux
   make -C build
   sudo make install -C build
   ```
