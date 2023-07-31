@@ -18,13 +18,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-The Linux kernel module source codes under the
-
-* rvgpu-driver-linux/
-
-directory are licensed as [GNU General Public License, version
-2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html).
-
 Following source code
 
 * src/rvgpu-renderer/ivi/ivi-application-client-protocol.c
