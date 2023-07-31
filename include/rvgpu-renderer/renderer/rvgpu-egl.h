@@ -117,6 +117,10 @@ struct rvgpu_egl_state {
 	/* backend support for spawning windows */
 	bool spawn_support;
 
+	/* backend requires specific native buffer format */
+	bool use_native_format;
+	uint32_t native_format;
+
 	bool use_scissors;
 };
 
