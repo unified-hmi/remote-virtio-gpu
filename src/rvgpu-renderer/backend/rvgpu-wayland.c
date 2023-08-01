@@ -97,6 +97,10 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
 	.ping = xdg_wm_base_ping,
 };
 
+#define min(a,b) ({ __typeof__ (a) _a = (a); \
+		  __typeof__ (b) _b = (b); \
+		  _a < _b ? _a : _b; })
+
 static void registry_add_object(void *data, struct wl_registry *registry,
 				uint32_t name, const char *interface,
 				uint32_t version)
@@ -106,13 +110,15 @@ static void registry_add_object(void *data, struct wl_registry *registry,
 
 	if (!strcmp(interface, wl_compositor_interface.name)) {
 		r->comp = wl_registry_bind(registry, name,
-					   &wl_compositor_interface, 1);
+					   &wl_compositor_interface,
+					   min(version, 4u));
 	} else if (!strcmp(interface, wl_shell_interface.name)) {
 		r->shell = wl_registry_bind(registry, name, &wl_shell_interface,
 					    1);
 	} else if (!strcmp(interface, xdg_wm_base_interface.name)) {
 		r->wm_base = wl_registry_bind(registry, name,
-					      &xdg_wm_base_interface, 1);
+					      &xdg_wm_base_interface,
+					      min(version, 2u));
 		xdg_wm_base_add_listener(r->wm_base, &xdg_wm_base_listener,
 					 NULL);
 	} else if (!strcmp(interface, wl_seat_interface.name)) {
