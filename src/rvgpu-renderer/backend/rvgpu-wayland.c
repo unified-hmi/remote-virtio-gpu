@@ -338,6 +338,11 @@ static void pointer_handle_button(void *data, struct wl_pointer *pointer,
 				if (surface)
 					wl_shell_surface_move(surface, r->seat,
 							      serial);
+
+				struct xdg_toplevel *xdg_toplevel =
+					r->egl.scanouts[i].native->xdg_toplevel;
+				if (xdg_toplevel)
+					xdg_toplevel_move(xdg_toplevel, r->seat, serial);
 			}
 		}
 	}
