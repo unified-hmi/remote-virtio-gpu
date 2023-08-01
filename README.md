@@ -37,17 +37,16 @@
 │    ├── rvgpu-renderer            # rvgpu-renderer header files
 ├── src
 │    ├── librvgpu                  # librvgpu source files
-│    ├── rvgpu-driver-linux        # rvgpu driver source files
 │    ├── rvgpu-proxy               # rvgpu-proxy source files
 │    ├── rvgpu-renderer            # rvgpu-renderer source files
-│    ├── rvgpu-sanity              # sanity module source files.
+│    ├── rvgpu-sanity              # sanity module source files
 ```
 
 ## Build instructions
 
 The build instructions described here are tested on Ubuntu 20.04 LTS AMD64.
 However you can try it with different Linux distros with Wayland display
-server. Assuming, you have a clean Ubuntu 20.04 installed, please perform the
+server. Assuming, you have a clean Ubuntu 20.04 installed, perform the
 following steps:
 
 - Install build tools
@@ -76,13 +75,24 @@ following steps:
   meson build/
   ninja -C build/ install
   ```
+- Install remote-virtio-gpu-driver
 
-- Install remote-virtio-gpu
+  ```
+  git clone https://github.com/unified-hmi/remote-virtio-gpu-driver.git
+  cd ~/remote-virtio-gpu-driver
+  mkdir build
+  cmake -B build -DCMAKE_BUILD_TYPE=Release
+  make -C build
+  sudo make install -C build
+  ```
+  
+- Install remote-virtio-gpu  
+**Note:** You need to install the remote-virtio-gpu-driver in advance. Follow the steps in the "install remote-virtio-gpu-driver" section mentioned above.
 
   ```
   cd ~/remote-virtio-gpu
   mkdir build
-  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVIRTIO_LO_DIR=../rvgpu-driver-linux
+  cmake -B build -DCMAKE_BUILD_TYPE=Release
   make -C build
   sudo make install -C build
   ```
@@ -110,7 +120,7 @@ following steps:
 
 To use **remote-virtio-gpu**, you need to load the kernel modules **virtio-gpu** and **virtio_lo**, so turn **Secure Boot** off.
 
-**rvgpu-renderer** creates a Wayland backend to display the stream, rendered by **rvgpu-proxy**. Therefore on login screen, please choose [Wayland](https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-20-04-desktop).
+**rvgpu-renderer** creates a Wayland backend to display the stream, rendered by **rvgpu-proxy**. Therefore on login screen, choose [Wayland](https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-20-04-desktop).
 
 Run both RVGPU client (**rvgpu-proxy**) and server (**rvgpu-renderer**) on the same machine via the localhost interface as follow:
 
@@ -193,4 +203,3 @@ rvgpu-renderer is listening to **rvgpu-proxy** through "-n" option.
 
 **Note**  
 Some graphical applications generate much network traffic. It is recommended to Configure the network to 1Gbps speed.
-

@@ -37,7 +37,7 @@
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
 #include <linux/virtio_ids.h>
-#include <linux/virtio_lo.h>
+#include <remote-virtio-gpu/virtio_lo.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
@@ -254,15 +254,25 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 		goto err_be;
 	}
 
-	char str_lib[] = "librvgpu.so";
+	const char *str_lib[] = {
+		"librvgpu.so",
+		"librvgpu.so.1",
+		"librvgpu.so.1.0.0",
+	};
 
-	/* Flush the current dl error state */
-	dlerror();
+	int i;
+	for (i = 0; i < sizeof(str_lib) / sizeof(const char *); i++ ) {
+		/* Flush the current dl error state */
+		dlerror();
 
-	rvgpu_be->lib_handle = dlopen(str_lib, RTLD_NOW);
+		rvgpu_be->lib_handle = dlopen(str_lib[i], RTLD_NOW);
+		if (rvgpu_be->lib_handle) {
+			break;
+		}
+	}
+
 	if (rvgpu_be->lib_handle == NULL) {
-		warnx("failed to open backend library '%s': %s", str_lib,
-		      dlerror());
+		warnx("failed to open backend library librvgpu: %s", dlerror());
 		goto err_sym;
 	}
 

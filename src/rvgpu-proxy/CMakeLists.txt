@@ -25,8 +25,7 @@ add_executable(rvgpu-proxy
 	$<TARGET_OBJECTS:rvgpu-sanity>)
 target_include_directories(rvgpu-proxy PRIVATE
 	${PROJECT_SOURCE_DIR}/include
-	${extlibs_INCLUDE_DIRS}
-	${VIRTIO_LO_DIR}/include/uapi)
+	${extlibs_INCLUDE_DIRS})
 target_compile_definitions(rvgpu-proxy PRIVATE
 	_FILE_OFFSET_BITS=64
 	_DEFAULT_SOURCE
