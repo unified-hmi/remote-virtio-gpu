@@ -254,25 +254,15 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 		goto err_be;
 	}
 
-	const char *str_lib[] = {
-		"librvgpu.so",
-		"librvgpu.so.1",
-		"librvgpu.so.1.0.0",
-	};
+	char str_lib[] = "librvgpu.so";
 
-	int i;
-	for (i = 0; i < sizeof(str_lib) / sizeof(const char *); i++ ) {
-		/* Flush the current dl error state */
-		dlerror();
+	/* Flush the current dl error state */
+	dlerror();
 
-		rvgpu_be->lib_handle = dlopen(str_lib[i], RTLD_NOW);
-		if (rvgpu_be->lib_handle) {
-			break;
-		}
-	}
-
+	rvgpu_be->lib_handle = dlopen(str_lib, RTLD_NOW);
 	if (rvgpu_be->lib_handle == NULL) {
-		warnx("failed to open backend library librvgpu: %s", dlerror());
+		warnx("failed to open backend library '%s': %s", str_lib,
+		      dlerror());
 		goto err_sym;
 	}
 
