@@ -24,7 +24,6 @@
 
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 
-static struct rvgpu_scanout_params _sout_params;
 struct rect {
 	int x;
 	int y;
@@ -127,21 +126,9 @@ void rvgpu_egl_set_scanout(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		e->cb->set_scanout(e, s);
 }
 
-void rvgpu_egl_get_scanout_box(void *_box)
-{
-	struct rect *box = (struct rect *)_box;
-
-	box->x = _sout_params.box.x;
-	box->y = _sout_params.box.y;
-	box->width = _sout_params.box.w;
-	box->height = _sout_params.box.h;
-}
-
 void rvgpu_egl_create_scanout(struct rvgpu_egl_state *e,
 			      struct rvgpu_scanout *s)
 {
-	if (e->use_scissors)
-		_sout_params = s->params;
 	assert(e->cb->create_scanout);
 	e->cb->create_scanout(e, s);
 }
