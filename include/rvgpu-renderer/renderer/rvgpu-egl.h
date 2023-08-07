@@ -120,8 +120,6 @@ struct rvgpu_egl_state {
 	/* backend requires specific native buffer format */
 	bool use_native_format;
 	uint32_t native_format;
-
-	bool use_scissors;
 };
 
 /** Initialize main context */
@@ -140,9 +138,6 @@ int rvgpu_egl_make_context_current(struct rvgpu_egl_state *e, void *ctx);
 /** Set scanout params */
 void rvgpu_egl_set_scanout(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 			   const struct rvgpu_virgl_params *sp);
-
-/** get scanout box */
-void rvgpu_egl_get_scanout_box(void *box);
 
 /** Create scanout */
 void rvgpu_egl_create_scanout(struct rvgpu_egl_state *e,
