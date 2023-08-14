@@ -29,6 +29,7 @@ target_include_directories(rvgpu-proxy PRIVATE
 target_compile_definitions(rvgpu-proxy PRIVATE
 	_FILE_OFFSET_BITS=64
 	_DEFAULT_SOURCE
-	_GNU_SOURCE)
+	_GNU_SOURCE
+	LIBRVGPU_SOVERSION=${LIBRVGPU_SOVERSION})
 target_link_libraries(rvgpu-proxy PRIVATE pthread dl)
 install(TARGETS rvgpu-proxy RUNTIME DESTINATION bin)

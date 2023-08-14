@@ -279,6 +279,9 @@ err_sym:
 	return -1;
 }
 
+#define STRINGIFY(s) STRINGIFY_(s)
+#define STRINGIFY_(s) #s
+
 struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 {
 	struct rvgpu_scanout_arguments scanout_args[MAX_HOSTS] = { 0 };
@@ -290,7 +293,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 		goto error;
 	}
 
-	char str_lib[] = "librvgpu.so";
+	char str_lib[] = "librvgpu.so." STRINGIFY(LIBRVGPU_SOVERSION);
 
 	/* Flush the current dl error state */
 	dlerror();
