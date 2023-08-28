@@ -1054,19 +1054,23 @@ static int gpu_device_serve_fences(struct gpu_device *g)
 	return processed;
 }
 
+union virtio_gpu_resp {
+	struct virtio_gpu_ctrl_hdr hdr;
+	struct virtio_gpu_resp_display_info rdi;
+	struct virtio_gpu_resp_capset_info ci;
+	struct virtio_gpu_resp_capset c;
+	uint8_t data[4096];
+};
+
 static void gpu_device_serve_ctrl(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
 	static bool reset;
 
-	union {
-		struct virtio_gpu_ctrl_hdr hdr;
-		struct virtio_gpu_resp_display_info rdi;
-		struct virtio_gpu_resp_capset_info ci;
-		struct virtio_gpu_resp_capset c;
-		uint8_t data[4096];
-	} resp;
+	static union virtio_gpu_cmd cmd;
+	static union virtio_gpu_resp resp;
+
 	memset(&resp.hdr, 0, sizeof(resp.hdr));
 #ifdef VSYNC_ENABLE
 	if (g->wait_vsync) {
@@ -1081,7 +1085,6 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 	while (1) {
 		struct vqueue_request *req;
 		size_t resp_len = sizeof(resp.hdr);
-		union virtio_gpu_cmd r;
 		struct rvgpu_header rhdr = {
 			.idx = 0,
 			.flags = 0,
@@ -1096,24 +1099,24 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 
 		rhdr.size = (uint32_t)iov_size(req->r, req->nr),
 
-		copy_from_iov(req->r, req->nr, &r, sizeof(r));
+		copy_from_iov(req->r, req->nr, &cmd, sizeof(cmd));
 
 		resp.hdr.flags = 0;
 		resp.hdr.fence_id = 0;
-		resp.hdr.type = sanity_check_gpu_ctrl(&r, rhdr.size, true);
+		resp.hdr.type = sanity_check_gpu_ctrl(&cmd, rhdr.size, true);
 
 		if (resp.hdr.type == VIRTIO_GPU_RESP_OK_NODATA) {
 			bool notify_all = true;
 			size_t i;
 
-			if (r.hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
+			if (cmd.hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
 				resp.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-				resp.hdr.fence_id = r.hdr.fence_id;
-				resp.hdr.ctx_id = r.hdr.ctx_id;
+				resp.hdr.fence_id = cmd.hdr.fence_id;
+				resp.hdr.ctx_id = cmd.hdr.ctx_id;
 				add_resp(g, &resp.hdr, vqueue_request_ref(req));
 			}
 
-			if (r.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
+			if (cmd.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
 				notify_all = false;
 
 			gpu_device_send_command(b, &rhdr, sizeof(rhdr),
@@ -1126,7 +1129,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 			}
 
 			/* command is sane, parse it */
-			switch (r.hdr.type) {
+			switch (cmd.hdr.type) {
 			case VIRTIO_GPU_CMD_GET_DISPLAY_INFO:
 				memcpy(resp.rdi.pmodes, g->params->dpys,
 				       g->params->num_scanouts *
@@ -1136,51 +1139,48 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_CREATE_2D:
 				resp.hdr.type = gpu_device_create_res(
-					g, r.r_c2d.resource_id,
+					g, cmd.r_c2d.resource_id,
 					&(struct rvgpu_res_info){
-						.target = 2,
-						.depth = 1,
+						.target     = 2,
+						.depth      = 1,
 						.array_size = 1,
-						.format = r.r_c2d.format,
-						.width = r.r_c2d.width,
-						.height = r.r_c2d.height,
-						.flags =
-							VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+						.format     = cmd.r_c2d.format,
+						.width      = cmd.r_c2d.width,
+						.height     = cmd.r_c2d.height,
+						.flags      = VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
 					});
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_CREATE_3D:
 				resp.hdr.type = gpu_device_create_res(
-					g, r.r_c3d.resource_id,
+					g, cmd.r_c3d.resource_id,
 					&(struct rvgpu_res_info){
-						.target = r.r_c3d.target,
-						.width = r.r_c3d.width,
-						.height = r.r_c3d.height,
-						.depth = r.r_c3d.depth,
-						.array_size =
-							r.r_c3d.array_size,
-						.format = r.r_c3d.format,
-						.flags = r.r_c3d.flags,
-						.last_level =
-							r.r_c3d.last_level,
+						.target     = cmd.r_c3d.target,
+						.width      = cmd.r_c3d.width,
+						.height     = cmd.r_c3d.height,
+						.depth      = cmd.r_c3d.depth,
+						.array_size = cmd.r_c3d.array_size,
+						.format     = cmd.r_c3d.format,
+						.flags      = cmd.r_c3d.flags,
+						.last_level = cmd.r_c3d.last_level,
 					});
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_UNREF:
 				resp.hdr.type = gpu_device_destroy_res(
-					g, r.r_unref.resource_id);
+					g, cmd.r_unref.resource_id);
 				break;
 			case VIRTIO_GPU_CMD_SET_SCANOUT:
-				if (r.s_set.scanout_id == 0)
-					g->scanres = r.s_set.resource_id;
-				g->scan_id = r.s_set.scanout_id;
+				if (cmd.s_set.scanout_id == 0)
+					g->scanres = cmd.s_set.resource_id;
+				g->scan_id = cmd.s_set.scanout_id;
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
 #ifdef VSYNC_ENABLE
-				if (r.r_flush.resource_id == g->scanres) {
+				if (cmd.r_flush.resource_id == g->scanres) {
 					static struct timespec vsync_ts;
 					if (gpu_device_read_vsync(g) == 0) {
 						gpu_device_trigger_vsync(
 							g, &resp.hdr, vqueue_request_ref(req),
-							r.hdr.flags, vsync_ts);
+							cmd.hdr.flags, vsync_ts);
 						clock_gettime(CLOCK_REALTIME,
 							      &vsync_ts);
 					}
@@ -1189,50 +1189,50 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				break;
 			case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 				resp.hdr.type = gpu_device_send_res(
-					g, r.t_2h2d.resource_id,
+					g, cmd.t_2h2d.resource_id,
 					&(struct rvgpu_res_transfer){
-						.x = r.t_2h2d.r.x,
-						.y = r.t_2h2d.r.y,
-						.w = r.t_2h2d.r.width,
-						.h = r.t_2h2d.r.height,
-						.offset = r.t_2h2d.offset,
-						.d = 1,
+						.x      = cmd.t_2h2d.r.x,
+						.y      = cmd.t_2h2d.r.y,
+						.w      = cmd.t_2h2d.r.width,
+						.h      = cmd.t_2h2d.r.height,
+						.offset = cmd.t_2h2d.offset,
+						.d      = 1,
 					});
 				break;
 			case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
 				resp.hdr.type = gpu_device_send_res(
-					g, r.t_h3d.resource_id,
+					g, cmd.t_h3d.resource_id,
 					&(struct rvgpu_res_transfer){
-						.x = r.t_h3d.box.x,
-						.y = r.t_h3d.box.y,
-						.z = r.t_h3d.box.z,
-						.w = r.t_h3d.box.w,
-						.h = r.t_h3d.box.h,
-						.d = r.t_h3d.box.d,
-						.level = r.t_h3d.level,
-						.stride = r.t_h3d.stride,
-						.offset = r.t_h3d.offset,
+						.x =      cmd.t_h3d.box.x,
+						.y =      cmd.t_h3d.box.y,
+						.z =      cmd.t_h3d.box.z,
+						.w =      cmd.t_h3d.box.w,
+						.h =      cmd.t_h3d.box.h,
+						.d =      cmd.t_h3d.box.d,
+						.level =  cmd.t_h3d.level,
+						.stride = cmd.t_h3d.stride,
+						.offset = cmd.t_h3d.offset,
 					});
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING:
 				resp.hdr.type = gpu_device_attach(
-					g, r.r_att.resource_id, r.r_mem,
-					r.r_att.nr_entries);
+					g, cmd.r_att.resource_id, cmd.r_mem,
+					cmd.r_att.nr_entries);
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING:
 				resp.hdr.type = gpu_device_detach(
-					g, r.r_det.resource_id);
+					g, cmd.r_det.resource_id);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET_INFO:
 				resp.hdr.type = gpu_device_capset_info(
-					g, r.capset_info.capset_index,
+					g, cmd.capset_info.capset_index,
 					&resp.ci);
 				resp_len = sizeof(resp.ci);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET:
 				resp_len = gpu_device_capset(
-					g, r.capset.capset_id,
-					r.capset.capset_version, &resp.c);
+					g, cmd.capset.capset_id,
+					cmd.capset.capset_version, &resp.c);
 				break;
 			default:
 				break;
