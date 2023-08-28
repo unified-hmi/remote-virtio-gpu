@@ -543,6 +543,7 @@ static unsigned int rvgpu_serve_vscanout(struct rvgpu_pr_state *pr,
 
 unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 {
+	static union virtio_gpu_cmd r;
 	struct rvgpu_header uhdr;
 
 	if (p->pp.capset)
@@ -550,7 +551,6 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 
 	while (rvgpu_pr_read(p, &uhdr, sizeof(uhdr), 1, COMMAND) == 1) {
 		struct iovec *piov;
-		union virtio_gpu_cmd r;
 		size_t ret;
 		int n;
 		unsigned int draw = 0;
