@@ -53,7 +53,7 @@ struct input_slot {
 struct input_device {
 	struct rvgpu_backend *backend;
 	short int revents[MAX_HOSTS];
-	int mouse, keyboard, touch;
+	int mouse, mouse_abs, keyboard, touch;
 	unsigned int slot;
 	struct input_slot slots[TOUCH_MAX_SLOTS];
 	unsigned int src_slots[MAX_HOSTS];
@@ -80,6 +80,17 @@ static const struct input_device_init mouse[] = {
 	/* wheel */
 	{ UI_SET_RELBIT, REL_WHEEL },
 	{ UI_SET_RELBIT, REL_HWHEEL },
+};
+
+static const struct input_device_init mouse_abs[] = {
+	/* absolute from QEMU */
+	{ UI_SET_EVBIT, EV_KEY },
+	{ UI_SET_KEYBIT, BTN_LEFT },
+	{ UI_SET_KEYBIT, BTN_RIGHT },
+	{ UI_SET_KEYBIT, BTN_MIDDLE },
+	{ UI_SET_EVBIT, EV_ABS },
+	{ UI_SET_ABSBIT, ABS_X },
+	{ UI_SET_ABSBIT, ABS_Y },
 };
 
 /* Emulate touchscreen */
@@ -218,6 +229,27 @@ static int setup_keyboard_keys(int fd)
 	}
 	return 0;
 }
+
+static int setup_mouse_abs(int fd)
+{
+	static struct uinput_abs_setup ioctl_data = {
+		.absinfo = {
+			.minimum = 0,
+			.maximum = 65535,
+		},
+	};
+
+	ioctl_data.code = ABS_X;
+	if (ioctl(fd, UI_ABS_SETUP, &ioctl_data) == -1)
+		return -1;
+
+	ioctl_data.code = ABS_Y;
+	if (ioctl(fd, UI_ABS_SETUP, &ioctl_data) == -1)
+		return -1;
+
+	return 0;
+}
+
 static int create_input_device(const struct input_device_init initctl[],
 			       size_t n, const char name[],
 			       int (*add_setup)(int fd))
@@ -271,10 +303,15 @@ struct input_device *input_device_init(struct rvgpu_backend *b)
 	if (g->mouse == -1)
 		goto err_free;
 
+	g->mouse_abs = create_input_device(mouse_abs, ARRAY_SIZE(mouse_abs), "rvgpu_mouse_abs",
+				       setup_mouse_abs);
+	if (g->mouse_abs == -1)
+		goto err_close_mouse;
+
 	g->touch = create_input_device(touch, ARRAY_SIZE(touch), "rvgpu_touch",
 				       setup_touch_axis);
 	if (g->touch == -1)
-		goto err_close_mouse;
+		goto err_close_mouse_abs;
 
 	g->keyboard =
 		create_input_device(keyboard, ARRAY_SIZE(keyboard),
@@ -290,6 +327,8 @@ struct input_device *input_device_init(struct rvgpu_backend *b)
 	return g;
 err_close_touch:
 	close(g->touch);
+err_close_mouse_abs:
+	close(g->mouse_abs);
 err_close_mouse:
 	close(g->mouse);
 err_free:
@@ -398,6 +437,9 @@ void input_device_serve(struct input_device *g,
 	case RVGPU_INPUT_MOUSE:
 		fd = g->mouse;
 		break;
+	case RVGPU_INPUT_MOUSE_ABS:
+		fd = g->mouse_abs;
+		break;
 	case RVGPU_INPUT_KEYBOARD:
 		fd = g->keyboard;
 		break;
@@ -415,7 +457,7 @@ void input_device_serve(struct input_device *g,
 		ie[ev].code = event[i].code;
 		ie[ev].type = event[i].type;
 		ie[ev].value = event[i].value;
-		if (ie[ev].type == EV_ABS)
+		if (ie[ev].type == EV_ABS && hdr->dev == RVGPU_INPUT_TOUCH)
 			touch_translate(g, hdr->src, ie, &ev, UINT16_MAX);
 		else
 			ev++;
@@ -441,6 +483,7 @@ void input_device_free(struct input_device *g)
 	if (!g)
 		return;
 	free_device(g->mouse);
+	free_device(g->mouse_abs);
 	free_device(g->keyboard);
 	free_device(g->touch);
 	free(g);

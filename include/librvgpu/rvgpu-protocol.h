@@ -72,6 +72,7 @@ struct rvgpu_patch {
  */
 enum rvgpu_input_dev {
 	RVGPU_INPUT_MOUSE, /**< mouse emulation */
+	RVGPU_INPUT_MOUSE_ABS,
 	RVGPU_INPUT_KEYBOARD, /**< keyboard emulation */
 	RVGPU_INPUT_TOUCH, /**< multi touch emulation */
 	RVGPU_INPUT_MAX, /**< for boundary check */

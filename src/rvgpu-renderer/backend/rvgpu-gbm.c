@@ -97,9 +97,9 @@ static void handle_touch_event(struct rvgpu_gbm_state *g,
 	}
 	x = libinput_event_touch_get_x_transformed(tev, g->mode.hdisplay);
 	y = libinput_event_touch_get_y_transformed(tev, g->mode.vdisplay);
+
 	if (t == LIBINPUT_EVENT_TOUCH_DOWN) {
 		struct rvgpu_scanout *s = &g->egl.scanouts[g->scanout_id];
-
 		rvgpu_in_add_slot(g->in, id, s->params.id, &s->window,
 				  &s->virgl.box, &s->virgl.tex);
 	}
@@ -109,6 +109,7 @@ static void handle_touch_event(struct rvgpu_gbm_state *g,
 static void rvgpu_gbm_input(struct rvgpu_gbm_state *g)
 {
 	struct libinput_event *ev;
+	static bool have_mouse_abs = false;
 
 	while ((ev = libinput_get_event(g->libin)) != NULL) {
 		enum libinput_event_type t = libinput_event_get_type(ev);
@@ -150,6 +151,26 @@ static void rvgpu_gbm_input(struct rvgpu_gbm_state *g)
 			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
 			break;
 		}
+
+		case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: {
+			struct libinput_event_pointer *pev =
+				libinput_event_get_pointer_event(ev);
+
+			have_mouse_abs = true;
+
+			double x = libinput_event_pointer_get_absolute_x(pev);
+			double y = libinput_event_pointer_get_absolute_y(pev);
+
+			struct rvgpu_input_event uiev[] = {
+				{ EV_ABS, ABS_X, (int32_t)x },
+				{ EV_ABS, ABS_Y, (int32_t)y },
+			};
+
+			rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE_ABS, uiev, 2);
+			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE_ABS);
+			break;
+		}
+
 		case LIBINPUT_EVENT_POINTER_BUTTON: {
 			struct libinput_event_pointer *pev =
 				libinput_event_get_pointer_event(ev);
@@ -159,8 +180,13 @@ static void rvgpu_gbm_input(struct rvgpu_gbm_state *g)
 					pev),
 				libinput_event_pointer_get_button_state(pev)
 			};
-			rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE, &uiev, 1);
-			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
+			if (have_mouse_abs) {
+				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE_ABS, &uiev, 1);
+				rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE_ABS);
+			} else {
+				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE, &uiev, 1);
+				rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
+			}
 			break;
 		}
 		case LIBINPUT_EVENT_POINTER_AXIS: {
