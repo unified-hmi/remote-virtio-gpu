@@ -94,6 +94,8 @@ struct rvgpu_egl_callbacks {
 	void (*draw)(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		     bool vsync);
 	void (*free)(struct rvgpu_egl_state *e);
+	void (*set_cursor)(struct rvgpu_egl_state *e, uint32_t w, uint32_t h, void *data);
+	void (*move_cursor)(struct rvgpu_egl_state *e, uint32_t x, uint32_t y);
 };
 
 struct rvgpu_egl_state {
@@ -113,9 +115,6 @@ struct rvgpu_egl_state {
 
 	/* additional params */
 	struct rvgpu_egl_params *params;
-
-	/* backend support for spawning windows */
-	bool spawn_support;
 
 	/* backend requires specific native buffer format */
 	bool use_native_format;

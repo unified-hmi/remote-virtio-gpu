@@ -115,22 +115,4 @@ struct rvgpu_res_message_header {
 	uint32_t fence_id; /**< fence identificator */
 };
 
-/**
- * @brief Flags for window spawn command
- *
- * These flags are used to have a mechanism of windows manipulating on the
- * target side.
- * Source calls the drmModeSetCursor2 function to transfer a spawn window
- * command to the target. The hot_x argument of the drmModeSetCursor2 function
- * is used to pass these flags.
- */
-enum rvgpu_spawn_window_flags {
-	RVGPU_WINDOW_CREATE = 0x80000001,
-	RVGPU_WINDOW_DESTROY,
-	RVGPU_WINDOW_UPDATE,
-	RVGPU_WINDOW_HIDE,
-	RVGPU_WINDOW_SHOW,
-	RVGPU_WINDOW_DESTROYALL,
-};
-
 #endif /* RVGPU_PROTOCOL_H */

@@ -496,50 +496,35 @@ static bool check_box(uint32_t resource_id, const struct virtio_gpu_box *b)
 					 info.depth);
 }
 
-static unsigned int rvgpu_serve_vscanout(struct rvgpu_pr_state *pr,
-					 struct rvgpu_egl_state *e,
-					 unsigned int cmd_type,
-					 unsigned int scanout_id,
-					 unsigned int res_id)
-{
-	struct rvgpu_scanout *s;
+static void rvgpu_serve_update_cursor(
+	struct rvgpu_pr_state *p,
+	struct virtio_gpu_update_cursor *c
+) {
+	uint32_t w, h;
+	void *data;
 
-	switch (cmd_type) {
-	case RVGPU_WINDOW_CREATE:
-		s = rvgpu_create_vscanout(e, scanout_id);
-		set_scanout(pr,
-			    &(struct virtio_gpu_set_scanout){ .resource_id =
-								      res_id },
-			    s);
-		return res_id;
-	case RVGPU_WINDOW_DESTROY:
-		s = rvgpu_get_vscanout(e, scanout_id);
-		if (s != NULL)
-			rvgpu_destroy_vscanout(e, s);
-		return 0;
-	case RVGPU_WINDOW_UPDATE:
-		s = rvgpu_get_vscanout(e, scanout_id);
-		if (s != NULL) {
-			set_scanout(pr,
-				    &(struct virtio_gpu_set_scanout){
-					    .resource_id = res_id },
-				    s);
-			return res_id;
-		}
-		return 0;
-	case RVGPU_WINDOW_HIDE:
-		/* TODO: hide window */
-		return 0;
-	case RVGPU_WINDOW_SHOW:
-		/* TODO: show window */
-		return 0;
-	case RVGPU_WINDOW_DESTROYALL:
-		rvgpu_destroy_all_vscanouts(e);
-		return 0;
-	default:
-		return 0;
-	}
+	if (!p->egl->cb->set_cursor)
+		return;
+
+	data = virgl_renderer_get_cursor_data(c->resource_id, &w, &h);
+	if (!data)
+		return;
+
+	p->egl->cb->set_cursor(p->egl, w, h, data);
+
+	free(data);
 }
+
+static void rvgpu_serve_move_cursor(
+	struct rvgpu_pr_state *p,
+	struct virtio_gpu_update_cursor *c)
+{
+	if (!p->egl->cb->move_cursor)
+		return;
+
+	p->egl->cb->move_cursor(p->egl, c->pos.x, c->pos.y);
+}
+
 
 unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 {
@@ -711,16 +696,11 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 		case VIRTIO_GPU_CMD_GET_DISPLAY_INFO:
 			/* ignore command */
 			break;
-
 		case VIRTIO_GPU_CMD_UPDATE_CURSOR:
-			if (!p->egl->spawn_support)
-				break;
-			draw = rvgpu_serve_vscanout(p, p->egl, r.cursor.hot_x,
-						    r.cursor.hot_y,
-						    r.cursor.resource_id);
+			rvgpu_serve_update_cursor(p, &r.cursor);
 			break;
 		case VIRTIO_GPU_CMD_MOVE_CURSOR:
-			/* TODO: handle cursor */
+			rvgpu_serve_move_cursor(p, &r.cursor);
 			break;
 		default:
 			warnx("Unknown command %d", r.hdr.type);

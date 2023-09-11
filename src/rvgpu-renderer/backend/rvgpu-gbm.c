@@ -28,6 +28,7 @@
 #include <GLES2/gl2.h>
 
 #include <sys/poll.h>
+#include <sys/mman.h>
 
 #include <assert.h>
 #include <fcntl.h>
@@ -73,6 +74,13 @@ struct rvgpu_gbm_state {
 	struct rvgpu_input_state *in;
 	struct libinput *libin;
 	struct udev *udev;
+
+	/* Cursor */
+	uint32_t cursor_w;
+	uint32_t cursor_h;
+	uint64_t cursor_size;
+	void *cursor_map;
+	uint32_t cursor_handle;
 };
 
 static inline struct rvgpu_gbm_state *to_gbm(struct rvgpu_egl_state *e)
@@ -389,12 +397,81 @@ static void rvgpu_gbm_process_events(struct rvgpu_egl_state *e, const void *ev,
 	}
 }
 
+static int rvgpu_cursor_init(struct rvgpu_gbm_state *g)
+{
+	uint64_t value;
+	uint32_t pitch;
+	uint64_t offset;
+	int err;
+
+	g->cursor_w = 64;
+	g->cursor_h = 64;
+
+	err = drmGetCap(g->gbm_fd, DRM_CAP_CURSOR_WIDTH, &value);
+	if (!err) {
+		g->cursor_w = value;
+	}
+
+	err = drmGetCap(g->gbm_fd, DRM_CAP_CURSOR_HEIGHT, &value);
+	if (!err) {
+		g->cursor_h = value;
+	}
+
+	err = drmModeCreateDumbBuffer(g->gbm_fd, g->cursor_w, g->cursor_h, 32, 0, &g->cursor_handle, &pitch, &g->cursor_size);
+	if (err)
+		return err;
+
+	err = drmModeMapDumbBuffer(g->gbm_fd, g->cursor_handle, &offset);
+	if (err)
+		return err;
+
+	g->cursor_map = mmap64(0, g->cursor_size, PROT_READ | PROT_WRITE, MAP_SHARED, g->gbm_fd, offset);
+	if (g->cursor_map == MAP_FAILED)
+		return -1;
+
+	return 0;
+}
+
+#if 0
+static void rvgpu_cursor_done(struct rvgpu_gbm_state *g)
+{
+	int err;
+
+	err = munmap(g->cursor_map, g->cursor_size);
+	if (err)
+		return;
+
+	drmModeDestroyDumbBuffer(g->gbm_fd, g->cursor_handle);
+}
+#endif
+
+static void rvgpu_set_cursor(struct rvgpu_egl_state *e, uint32_t dw, uint32_t dh, void *data)
+{
+	struct rvgpu_gbm_state *g = to_gbm(e);
+
+	if (g->cursor_w != dw || g->cursor_h != dh)
+		return;
+
+	memcpy(g->cursor_map, data, g->cursor_size);
+
+	drmModeSetCursor(g->gbm_fd, g->crtc->crtc_id, g->cursor_handle, g->cursor_w, g->cursor_h);
+}
+
+static void rvgpu_move_cursor(struct rvgpu_egl_state *e, uint32_t x, uint32_t y)
+{
+	struct rvgpu_gbm_state *g = to_gbm(e);
+
+	drmModeMoveCursor(g->gbm_fd, g->crtc->crtc_id, x, y);
+}
+
 static const struct rvgpu_egl_callbacks gbm_callbacks = {
 	.free = rvgpu_gbm_free,
 	.draw = rvgpu_gbm_draw,
 	.create_scanout = rvgpu_gbm_create_scanout,
 	.prepare_events = rvgpu_gbm_prepare_events,
 	.process_events = rvgpu_gbm_process_events,
+	.set_cursor = rvgpu_set_cursor,
+	.move_cursor = rvgpu_move_cursor
 };
 
 static int open_restricted(const char *path, int flags, void *user_data)
@@ -473,9 +550,6 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 	g->egl.dpy = eglGetDisplay(g->gbm_device);
 	assert(g->egl.dpy);
 
-	/* GBM doesn't support spawned windows */
-	g->egl.spawn_support = false;
-
 	/* GBM requires to use a specific native format */
 	g->egl.use_native_format = true;
 	g->egl.native_format = NATIVE_GBM_FORMAT;
@@ -497,6 +571,8 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 	libinput_log_set_priority(g->libin, LIBINPUT_LOG_PRIORITY_INFO);
 	libinput_udev_assign_seat(g->libin, seat);
 	libinput_dispatch(g->libin);
+
+	rvgpu_cursor_init(g);
 
 	return &g->egl;
 }

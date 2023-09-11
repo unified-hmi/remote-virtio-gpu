@@ -868,9 +868,6 @@ struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
 	r->egl.dpy = eglGetDisplay(r->dpy);
 	assert(r->egl.dpy);
 
-	/* Wayland supports spawned windows */
-	r->egl.spawn_support = true;
-
 	/* Wayland does not require to use any specific native format */
 	r->egl.use_native_format = false;
 
