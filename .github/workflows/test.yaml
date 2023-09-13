@@ -42,7 +42,7 @@ jobs:
       - name: Fetch virtio-lo development package
         uses: robinraju/release-downloader@v1.8
         with:
-          repository: ${{ format('{0}/remote-virtio-gpu-driver', github.actor) }}
+          repository: ${{ format('{0}/virtio-loopback-driver', github.actor) }}
           latest: true
           fileName: "virtio-lo-dev_*.deb"
 
