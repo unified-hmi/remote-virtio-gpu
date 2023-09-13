@@ -16,9 +16,15 @@
 #
 
 
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.5)
 project(rvgpu C)
 set(CMAKE_C_STANDARD 11)
+
+set(CMAKE_C_FLAGS       "${CMAKE_C_FLAGS} -Wall -Wextra")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Werror")
+
+set(LIBRVGPU_VERSION 0.1.0)
+set(LIBRVGPU_SOVERSION 0)
 
 if (CMAKE_SYSROOT AND NOT ENV{PKG_CONFIG_LIBDIR})
 	set(ENV{PKG_CONFIG_DIR} "")
@@ -33,9 +39,9 @@ add_subdirectory(src)
 
 include(GNUInstallDirs)
 install(FILES settings/virgl.capset
-        DESTINATION /etc
+        DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}
 )
 install(DIRECTORY settings/udev/
-        DESTINATION /usr/lib/udev/rules.d
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/udev/rules.d
         FILES_MATCHING PATTERN "*.rules"
 )

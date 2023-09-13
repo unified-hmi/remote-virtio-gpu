@@ -44,6 +44,7 @@ static void usage(void)
 	info("\t-a\t\tenable translucent mode on Wayland\n");
 	info("\t-B color\tcolor of initial screen in RGBA format");
 	info("(0xRRGGBBAA, default is 0x%08x)\n", BACKEND_COLOR);
+	info("\t-c capset\tdump capset into file\n");
 	info("\t-s scanout\tdisplay specified scanout\n");
 	info("\t-b box\t\toverride scanout box (format WxH@X,Y)\n");
 	info("\t-i ID\t\tset scanout window ID (for IVI shell)\n");
@@ -181,7 +182,7 @@ int main(int argc, char **argv)
 	char *errstr = NULL;
 	const char *carddev = NULL;
 	const char *seat = "seat0";
-	int w, h, x, y, opt, res, res_socket = 0;
+	int w, h, x, y, opt, res_socket = 0;
 	unsigned int res_id, scanout;
 	uint16_t port_nr = RVGPU_DEFAULT_PORT;
 	FILE *input_stream = stdout;
@@ -189,6 +190,7 @@ int main(int argc, char **argv)
 	     user_specified_scanouts = false;
 
 	memset(sp, 0, sizeof(sp));
+	memset(&pp, 0, sizeof(pp));
 
 	while ((opt = getopt(argc, argv, "afhvi:c:s:S:b:B:p:g:")) != -1) {
 		switch (opt) {

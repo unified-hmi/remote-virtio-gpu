@@ -333,6 +333,7 @@ static size_t rvgpu_gbm_prepare_events(struct rvgpu_egl_state *e, void *ev,
 	struct rvgpu_gbm_state *g = to_gbm(e);
 
 	assert(max >= 2);
+	(void)max;
 	struct pollfd *fds = (struct pollfd *)ev;
 
 	fds[0].fd = g->gbm_fd;
@@ -389,6 +390,8 @@ static const struct libinput_interface interface = {
 	.close_restricted = close_restricted,
 };
 
+#define NATIVE_GBM_FORMAT GBM_FORMAT_XRGB8888
+
 struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 				       FILE *events_out)
 {
@@ -444,11 +447,18 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 	g->egl.dpy = eglGetDisplay(g->gbm_device);
 	assert(g->egl.dpy);
 
+	/* GBM doesn't support spawned windows */
+	g->egl.spawn_support = false;
+
+	/* GBM requires to use a specific native format */
+	g->egl.use_native_format = true;
+	g->egl.native_format = NATIVE_GBM_FORMAT;
+
 	rvgpu_egl_init_context(&g->egl);
 
 	g->gbm_surface =
 		gbm_surface_create(g->gbm_device, g->mode.hdisplay,
-				   g->mode.vdisplay, GBM_BO_FORMAT_XRGB8888,
+				   g->mode.vdisplay, NATIVE_GBM_FORMAT,
 				   GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 	assert(g->gbm_surface);
 
@@ -462,7 +472,5 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 	libinput_udev_assign_seat(g->libin, seat);
 	libinput_dispatch(g->libin);
 
-	/* GBM doesn't support spawned windows */
-	g->egl.spawn_support = false;
 	return &g->egl;
 }

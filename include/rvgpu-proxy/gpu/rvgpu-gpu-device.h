@@ -74,15 +74,12 @@ void destroy_backend_rvgpu(struct rvgpu_backend *b);
  * @brief Initializes new virtio-gpu device using virtio loopback
  * @param lo_fd - virtio loopback descriptor
  * @param efd - epoll file descriptor to wait on
- * @param cidx - epoll index for config change
- * @param eidx - epoll index for queues
  * @param capset - capset file descriptor
  * @param params - pointer to input params
  * @param b - RVGPU plugin for network communications
  * @return pointer to gpu device structure
  */
-struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
-				   uint32_t qidx, int capset,
+struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 				   const struct gpu_device_params *params,
 				   struct rvgpu_backend *b);
 

@@ -22,8 +22,8 @@ add_library(rvgpu SHARED
 )
 set_target_properties(rvgpu
 	PROPERTIES
-	VERSION 1.0.0
-	SOVERSION 1
+	VERSION    ${LIBRVGPU_VERSION}
+	SOVERSION  ${LIBRVGPU_SOVERSION}
 	)
 target_link_libraries(rvgpu PRIVATE pthread)
 target_include_directories(rvgpu

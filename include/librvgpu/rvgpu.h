@@ -39,19 +39,6 @@ struct gpu_reset {
 	pthread_cond_t cond;
 };
 
-struct poll_entries {
-	struct pollfd *ses_timer;
-	struct pollfd *recon_timer;
-	struct pollfd *cmd_host;
-	struct pollfd *cmd_pipe_in;
-	struct pollfd *res_host;
-	struct pollfd *res_pipe_in;
-};
-
-struct conninfo {
-	struct addrinfo *servinfo, *p;
-};
-
 struct conn_pipes {
 	int rcv_pipe[2];
 	int snd_pipe[2];
@@ -275,26 +262,6 @@ int rvgpu_send(struct rvgpu_scanout *scanout, enum pipe_type p, const void *buf,
  */
 void rvgpu_frontend_reset_state(struct rvgpu_ctx *ctx, enum reset_state state);
 
-int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
-		     struct rvgpu_scanout_arguments *args);
-void free_communic_pipes(struct rvgpu_scanout *scanout);
-int init_communic_pipes(struct rvgpu_scanout *scanout);
-bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
-			int reconn_fd, unsigned int count);
-bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
-		   unsigned int *active_sessions, unsigned int count);
-void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state);
-void flush_input_pipes(struct ctx_priv *ctx, int devnull, enum pipe_type p);
-int wait_scanouts_init(struct ctx_priv *ctx);
-int read_all(int fd, void *buf, size_t bytes);
-int init_timer(void);
-void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
-		unsigned int res_cnt, unsigned int idx);
-void close_conn(struct vgpu_host *vhost);
-void reconnect_all(struct vgpu_host *vhost[], unsigned int count);
-int reconnect_single(struct vgpu_host *host);
-void set_timer(int timerfd, unsigned int msec);
-void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s);
 void *thread_conn_tcp(void *arg);
 
 #endif /* RVGPU_H */

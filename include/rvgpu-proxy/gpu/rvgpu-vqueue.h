@@ -20,6 +20,7 @@
 
 #include <linux/virtio_ring.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <sys/uio.h>
 
@@ -34,48 +35,61 @@ struct vqueue {
 /**
  * @brief Virtqueue request (device part)
  */
+#define VQUEUE_REQUEST_IOVEC_LEN 1024
 struct vqueue_request {
-	struct iovec *r; /**< iovectors for reading */
-	struct iovec *w; /**< iovectors for writing */
+	struct iovec r[VQUEUE_REQUEST_IOVEC_LEN]; /**< iovectors for reading */
+	struct iovec w[VQUEUE_REQUEST_IOVEC_LEN]; /**< iovectors for writing */
 	size_t nr; /**< number of read iovecs */
 	size_t nw; /**< number of write iovecs */
-	size_t maxnum; /**< maximum number of iovecs */
 	uint16_t idx; /**< index of first descriptior in the chain */
+	struct vqueue *q;
+
+	bool mapped;
+	unsigned int refcount;
 };
 
 /**
- * @brief Init vqueue request structure
- * @param req - request to initialize
- * @param maxnum - maximum number of descriptors (size of queue)
- * @retval 0 if everything is OK
- * @retval -1 if there is no memory
+ * @brief Check if the queue has new requests
+ * @retval yes it does
  */
-int vqueue_init_request(struct vqueue_request *req, size_t maxnum);
+static inline bool vqueue_are_requests_available(struct vqueue *q)
+{
+	return q->last_avail_idx != q->vr.avail->idx;
+}
 
 /**
- * @brief Frees resources of request
- * @param req - request to free
+ * @brief Increase the reference count of the request
+ * @param q - a reference to the request
+ * @retval a new reference to the request
  */
-void vqueue_free_request(struct vqueue_request *req);
+static inline struct vqueue_request *
+vqueue_request_ref(struct vqueue_request *req)
+{
+	req->refcount++;
+	return req;
+}
+
+/**
+ * @brief Decrease the reference count of the request
+ * @param q - a reference to the request
+ */
+void vqueue_request_unref(struct vqueue_request *req);
 
 /**
  * @brief Get next request from the vqueue
  * @param vilo - descriptor needed for memory mapping
  * @param q - queue to get requests from
- * @param req - structure for request
- * @retval 0 if no more pending requests are in the queue
- * @retval 1 if there is a pending request in the queue
+ * @retval a new request
  */
-int vqueue_get_request(int vilo, struct vqueue *q, struct vqueue_request *req);
+struct vqueue_request *vqueue_get_request(int vilo, struct vqueue *q);
 
 /**
  * @brief Send response to certain request
- * @param q - queue to send response to (should match request)
  * @param req - request to send reply to
  * @param resp - response buffer
  * @param resp_len - size of response buffer
  */
-void vqueue_send_response(struct vqueue *q, struct vqueue_request *req,
-			  void *resp, size_t resp_len);
+void vqueue_send_response(struct vqueue_request *req, void *resp,
+			  size_t resp_len);
 
 #endif /* RVGPU_VQUEUE_H */

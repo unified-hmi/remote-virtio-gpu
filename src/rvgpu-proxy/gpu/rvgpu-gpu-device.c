@@ -31,13 +31,15 @@
 #include <sys/poll.h>
 #include <sys/queue.h>
 #include <sys/timerfd.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
 #include <linux/virtio_ids.h>
-#include <remote-virtio-gpu/virtio_lo.h>
+#include <linux/virtio_lo.h>
+#include <linux/version.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
@@ -66,6 +68,38 @@
 
 #define VERSION_SYMBOL_NAME "rvgpu_backend_version"
 
+/*
+ * The commit 34268c9dde4 from linux kernel changes virtio_gpu_ctrl_hdr
+ * that is used by UHMI to implement vsync.
+ * Check if we are compiled with old enough kernel.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
+# define VSYNC_ENABLE
+#endif
+
+#ifdef VSYNC_ENABLE
+/* Check if we are being ran on old enough kernel */
+static bool ok_to_use_vsync(void)
+{
+	struct utsname buffer;
+	unsigned int major;
+	unsigned int minor;
+	int ret;
+
+	if (uname(&buffer) != 0)
+		err(1, "uname() errror");
+
+	ret = sscanf(buffer.release, "%u.%u", &major, &minor);
+	if (ret != 2)
+		errx(1, "can not parse kernel release");
+
+	if (major == 5)
+		return minor < 15;
+
+	return major < 5;
+}
+#endif
+
 #define GPU_BE_FIND_PLUGIN_VERSION(ver)                                        \
 	do {                                                                   \
 		uint32_t *ver_ptr =                                            \
@@ -92,12 +126,12 @@
 
 struct gpu_capdata {
 	struct capset hdr;
-	uint8_t data[1024];
+	uint8_t data[CAPSET_MAX_SIZE];
 };
 
 struct cmd {
 	struct virtio_gpu_ctrl_hdr hdr;
-	struct vqueue_request req;
+	struct vqueue_request *req;
 
 	TAILQ_ENTRY(cmd) cmds;
 };
@@ -111,7 +145,12 @@ struct gpu_device {
 	int lo_fd;
 	int config_fd;
 	int kick_fd;
+
+#ifdef VSYNC_ENABLE
 	int vsync_fd;
+	int wait_vsync;
+#endif
+
 
 	size_t max_mem;
 	size_t curr_mem;
@@ -119,7 +158,6 @@ struct gpu_device {
 
 	uint32_t scanres;
 	uint32_t scan_id;
-	int wait_vsync;
 
 	unsigned int idx;
 	struct gpu_capdata capdata[GPU_MAX_CAPDATA];
@@ -128,8 +166,6 @@ struct gpu_device {
 	struct virtio_gpu_config config;
 	pthread_t resource_thread;
 
-	struct vqueue_request ctrl;
-	struct vqueue_request cursor;
 	struct vqueue vq[2];
 	struct rvgpu_backend *backend;
 	struct async_resp *async_resp;
@@ -177,8 +213,8 @@ int write_all(int fd, const void *buf, size_t bytes)
 	return offset;
 }
 
-int rvgpu_init_backends(struct rvgpu_backend *b,
-			struct rvgpu_scanout_arguments *scanout_args)
+static int rvgpu_init_backends(struct rvgpu_backend *b,
+			       struct rvgpu_scanout_arguments *scanout_args)
 {
 	struct rvgpu_ctx *ctx = &b->plugin_v1.ctx;
 	void *plugin = b->lib_handle;
@@ -208,7 +244,7 @@ err_sym:
 	return -1;
 }
 
-int rvgpu_init_ctx(struct rvgpu_backend *b, struct rvgpu_ctx_arguments ctx_args)
+static int rvgpu_init_ctx(struct rvgpu_backend *b, struct rvgpu_ctx_arguments ctx_args)
 {
 	struct rvgpu_ctx *ctx = &b->plugin_v1.ctx;
 	struct rvgpu_backend *be = b;
@@ -243,6 +279,9 @@ err_sym:
 	return -1;
 }
 
+#define STRINGIFY(s) STRINGIFY_(s)
+#define STRINGIFY_(s) #s
+
 struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 {
 	struct rvgpu_scanout_arguments scanout_args[MAX_HOSTS] = { 0 };
@@ -251,29 +290,19 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 	rvgpu_be = calloc(1, sizeof(*rvgpu_be));
 	if (rvgpu_be == NULL) {
 		warnx("failed to allocate backend: %s", strerror(errno));
-		goto err_be;
+		goto error;
 	}
 
-	const char *str_lib[] = {
-		"librvgpu.so",
-		"librvgpu.so.1",
-		"librvgpu.so.1.0.0",
-	};
+	char str_lib[] = "librvgpu.so." STRINGIFY(LIBRVGPU_SOVERSION);
 
-	int i;
-	for (i = 0; i < sizeof(str_lib) / sizeof(const char *); i++ ) {
-		/* Flush the current dl error state */
-		dlerror();
+	/* Flush the current dl error state */
+	dlerror();
 
-		rvgpu_be->lib_handle = dlopen(str_lib[i], RTLD_NOW);
-		if (rvgpu_be->lib_handle) {
-			break;
-		}
-	}
-
+	rvgpu_be->lib_handle = dlopen(str_lib, RTLD_NOW);
 	if (rvgpu_be->lib_handle == NULL) {
-		warnx("failed to open backend library librvgpu: %s", dlerror());
-		goto err_sym;
+		warnx("failed to open backend library '%s': %s", str_lib,
+		      dlerror());
+		goto error_free;
 	}
 
 	struct rvgpu_ctx_arguments ctx_args = {
@@ -284,25 +313,26 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 
 	if (rvgpu_init_ctx(rvgpu_be, ctx_args)) {
 		warnx("failed to init rvgpu ctx");
-		goto err_sym;
+		goto error_dlclose;
 	}
 
-	for (int i = 0; i < servers->host_cnt; i++) {
+	for (unsigned int i = 0; i < servers->host_cnt; i++) {
 		scanout_args[i].tcp.ip = strdup(servers->hosts[i].hostname);
 		scanout_args[i].tcp.port = strdup(servers->hosts[i].portnum);
 	}
 
 	if (rvgpu_init_backends(rvgpu_be, scanout_args)) {
 		warnx("failed to init rvgpu backends");
-		goto err_sym;
+		goto error_dlclose;
 	}
 
 	return rvgpu_be;
-err_sym:
-	free(rvgpu_be);
-err_be:
-	dlclose(rvgpu_be->lib_handle);
 
+error_dlclose:
+	dlclose(rvgpu_be->lib_handle);
+error_free:
+	free(rvgpu_be);
+error:
 	return NULL;
 }
 
@@ -335,29 +365,36 @@ static void gpu_capset_init(struct gpu_device *g, int capset)
 	for (i = 0u; i < GPU_MAX_CAPDATA; i++) {
 		struct gpu_capdata *c = &g->capdata[i];
 
-		if (read(capset, &c->hdr, sizeof(c->hdr)) !=
-		    (ssize_t)sizeof(c->hdr))
-			break;
+		while (1) {
 
-		if (c->hdr.size > sizeof(c->data)) {
-			warnx("too long capset");
-			break;
+			if (read(capset, &c->hdr, sizeof(c->hdr)) !=
+			    (ssize_t)sizeof(c->hdr))
+				goto done;
+
+			if (c->hdr.size > sizeof(c->data)) {
+				warnx("too long capset");
+				goto done;
+			}
+
+			if (read(capset, c->data, c->hdr.size) !=
+			    (ssize_t)c->hdr.size) {
+				warn("cannot read capset data");
+				goto done;
+			}
+
+			if (c->hdr.id == 1)
+				break;
 		}
-		if (read(capset, c->data, c->hdr.size) !=
-		    (ssize_t)c->hdr.size) {
-			warn("cannot read capset data");
-			break;
-		}
-		if (c->hdr.id > g->config.num_capsets)
-			g->config.num_capsets = c->hdr.id;
 	}
+
+done:
 	g->ncapdata = i;
+	g->config.num_capsets = i;
 }
 
 size_t process_fences(struct gpu_device *g, uint32_t fence_id)
 {
 	struct async_resp *r = g->async_resp;
-	struct virtio_gpu_ctrl_hdr hdr;
 	struct cmd *cmd;
 	size_t processed = 0;
 
@@ -367,8 +404,7 @@ size_t process_fences(struct gpu_device *g, uint32_t fence_id)
 		    (cmd->hdr.flags & VIRTIO_GPU_FLAG_VSYNC))
 			continue;
 
-		memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-		vqueue_send_response(&g->vq[0], &cmd->req, &hdr, sizeof(hdr));
+		vqueue_send_response(cmd->req, &cmd->hdr, sizeof(cmd->hdr));
 		TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 		free(cmd);
 		processed++;
@@ -387,7 +423,7 @@ void add_resp(struct gpu_device *g, struct virtio_gpu_ctrl_hdr *hdr,
 	assert(cmd);
 
 	memcpy(&cmd->hdr, hdr, sizeof(*hdr));
-	memcpy(&cmd->req, req, sizeof(*req));
+	cmd->req = req;
 
 	TAILQ_INSERT_TAIL(&r->async_cmds, cmd, cmds);
 }
@@ -402,7 +438,7 @@ void destroy_async_resp(struct gpu_device *g)
 	free(r);
 }
 
-struct async_resp *init_async_resp(struct gpu_device *g)
+static struct async_resp *init_async_resp(void)
 {
 	struct async_resp *r;
 
@@ -434,6 +470,94 @@ int wait_resource_events(struct rvgpu_backend *b, short int *revents)
 					       events, revents);
 }
 
+static void gpu_device_send_command(struct rvgpu_backend *u, void *buf,
+				    size_t size, bool notify_all)
+{
+	struct rvgpu_scanout *s;
+	int ret;
+
+	if (notify_all) {
+		if (u->plugin_v1.ops.rvgpu_ctx_send(&u->plugin_v1.ctx, buf,
+						    size)) {
+			warn("short write");
+		}
+	} else {
+		s = &u->plugin_v1.scanout[0];
+		ret = s->plugin_v1.ops.rvgpu_send(s, COMMAND, buf, size);
+
+		if (ret != (int)size)
+			warn("short write");
+	}
+}
+
+static void read_from_pipe(struct rvgpu_scanout *s, char *buf, size_t size)
+{
+	size_t offset = 0;
+	int ret = 0;
+
+	while (offset < size) {
+		ret = s->plugin_v1.ops.rvgpu_recv(
+		    s, RESOURCE, (buf) ? buf + offset : buf, size - offset);
+
+		if (ret == (int)size)
+			break;
+
+		if (ret <= 0)
+			err(1, "Short read res pipe");
+
+		offset += ret;
+		if (offset > size)
+			err(1, "Buffer overflow");
+	}
+}
+
+static void resource_update(struct rvgpu_scanout *s, const struct iovec iovs[],
+			    size_t niov, size_t skip, size_t length)
+{
+	for (size_t i = 0u; i < niov && length > 0u; i++) {
+		const struct iovec *iov = &iovs[i];
+		if (skip >= iov->iov_len) {
+			skip -= iov->iov_len;
+		} else {
+			size_t l = iov->iov_len - skip;
+			if (l > length) {
+				l = length;
+			}
+			read_from_pipe(s, (char *)iov->iov_base + skip, l);
+			skip = 0u;
+			length -= l;
+		}
+	}
+}
+
+static void resource_transfer(struct gpu_device *g, struct rvgpu_scanout *s)
+{
+	struct rvgpu_header header = {0, 0, 0};
+	struct rvgpu_patch patch = {0, 0, 0};
+	struct virtio_gpu_transfer_host_3d t;
+	struct rvgpu_res *res;
+
+	read_from_pipe(s, (char *)&header, sizeof(header));
+
+	if (header.size != sizeof(t))
+		err(1, "Resource transfer protocol error");
+
+	read_from_pipe(s, (char *)&t, sizeof(t));
+	read_from_pipe(s, (char *)&patch, sizeof(patch));
+
+	res = g->backend->plugin_v1.ops.rvgpu_ctx_res_find(
+	    &g->backend->plugin_v1.ctx, t.resource_id);
+
+	if (!res || !res->backing) {
+		fprintf(stderr, "insufficient resource id %d, res %p\n",
+			t.resource_id, res);
+		return;
+	}
+
+	resource_update(s, res->backing, res->nbacking, patch.offset,
+			patch.len);
+}
+
 static void *resource_thread_func(void *param)
 {
 	struct gpu_device *g = (struct gpu_device *)param;
@@ -460,6 +584,7 @@ static void *resource_thread_func(void *param)
 				ssize_t ret = s->plugin_v1.ops.rvgpu_recv_all(
 					s, RESOURCE, &msg, sizeof(msg));
 				assert(ret > 0);
+				(void)ret;
 
 				if (msg.type == RVGPU_FENCE) {
 					recv_fence_flags[i] = 1;
@@ -485,22 +610,24 @@ static void *resource_thread_func(void *param)
 							sizeof(sync_fence_id));
 						assert(ret >= 0);
 					}
+				} else if (msg.type == RVGPU_RES_TRANSFER) {
+					resource_transfer(
+					    g, &b->plugin_v1.scanout[i]);
 				}
 			}
 		}
 	}
+
+	return NULL;
 }
 
-struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
-				   uint32_t qidx, int capset,
+struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 				   const struct gpu_device_params *params,
 				   struct rvgpu_backend *b)
 {
 	struct gpu_device *g;
 	struct virtio_lo_qinfo q[2];
-	pthread_t fence_thread;
 	unsigned int i;
-	int ret;
 
 	struct virtio_lo_devinfo info = {
 		.nqueues = 2u,
@@ -540,8 +667,6 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
 		err(1, "add virtio-lo-device");
 
 	g->idx = info.idx;
-	vqueue_init_request(&g->ctrl, q[0].size);
-	vqueue_init_request(&g->cursor, q[1].size);
 
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
@@ -557,29 +682,36 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, uint32_t cidx,
 						       q[i].size * 8u + 6u);
 	}
 
-	if (params->framerate) {
+#ifdef VSYNC_ENABLE
+	if (params->framerate && ok_to_use_vsync()) {
 		g->vsync_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
 		if (g->vsync_fd == -1)
 			err(1, "timerfd_create");
 
 		epoll_ctl(efd, EPOLL_CTL_ADD, g->vsync_fd,
 			  &(struct epoll_event){ .events = EPOLLIN | EPOLLET,
-						 .data = { .u32 = qidx } });
+						 .data = { .u32 = PROXY_GPU_QUEUES } });
 	} else {
+		if (params->framerate)
+			warnx("binary is running on the kernel version that can not support vsync");
 		g->vsync_fd = -1;
 	}
+#else
+	if (params->framerate)
+		warnx("binary was compiled for the kernel version that can not support vsync");
+#endif
 
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->config_fd,
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = cidx } });
+					 .data = { .u32 = PROXY_GPU_CONFIG } });
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->kick_fd,
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = qidx } });
+					 .data = { .u32 = PROXY_GPU_QUEUES } });
 
-	g->async_resp = init_async_resp(g);
+	g->async_resp = init_async_resp();
 	epoll_ctl(efd, EPOLL_CTL_ADD, g->async_resp->fence_pipe[PIPE_READ],
 		  &(struct epoll_event){ .events = EPOLLIN,
-					 .data = { .u32 = qidx } });
+					 .data = { .u32 = PROXY_GPU_QUEUES } });
 
 	g->backend = b;
 
@@ -594,8 +726,6 @@ void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
 
-	vqueue_free_request(&g->ctrl);
-	vqueue_free_request(&g->cursor);
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
 
@@ -604,7 +734,9 @@ void gpu_device_free(struct gpu_device *g)
 		unmap_guest(vr->used, vr->num * 8u + 6u);
 	}
 
+#ifdef VSYNC_ENABLE
 	close(g->vsync_fd);
+#endif
 	close(g->config_fd);
 	close(g->kick_fd);
 	if (g->backend)
@@ -719,7 +851,8 @@ static unsigned int gpu_device_attach(struct gpu_device *g, unsigned int resid,
 	res->nbacking = n;
 	for (i = 0u; i < n; i++) {
 		res->backing[i].iov_base = map_guest(g->lo_fd, mem[i].addr,
-						     PROT_READ, mem[i].length);
+						     PROT_READ | PROT_WRITE,
+						     mem[i].length);
 		res->backing[i].iov_len = mem[i].length;
 		sentsize += mem[i].length;
 	}
@@ -763,97 +896,46 @@ static unsigned int gpu_device_detach(struct gpu_device *g, unsigned int resid)
 	return VIRTIO_GPU_RESP_OK_NODATA;
 }
 
-static void gpu_device_capset_info(struct gpu_device *g, unsigned int index,
-				   struct virtio_gpu_resp_capset_info *ci)
+static unsigned int gpu_device_capset_info(struct gpu_device *g, unsigned int index,
+					   struct virtio_gpu_resp_capset_info *ci)
 {
-	ci->capset_id = 0u;
-	ci->capset_max_version = 0u;
-	ci->capset_max_size = 0u;
-
-	for (size_t i = 0u; i < g->ncapdata; i++) {
-		const struct gpu_capdata *c = &g->capdata[i];
-
-		if ((index + 1) == c->hdr.id) {
-			ci->capset_id = c->hdr.id;
-			if (c->hdr.version > ci->capset_max_version)
-				ci->capset_max_version = c->hdr.version;
-
-			if (c->hdr.size > ci->capset_max_size)
-				ci->capset_max_size = c->hdr.size;
-		}
-	}
-}
-
-static struct gpu_capdata *gpu_device_find_capset(struct gpu_device *g,
-						  unsigned int capset_id,
-						  unsigned int capset_version)
-{
-	if (capset_version) {
-		for (size_t i = 0u; i < g->ncapdata; i++) {
-			struct gpu_capdata *cd = &g->capdata[i];
-
-			if (capset_id == cd->hdr.id &&
-			    capset_version == cd->hdr.version) {
-				return cd;
-			}
-		}
+	if (index < g->ncapdata) {
+		const struct gpu_capdata *c = g->capdata + index;
+		ci->capset_id = c->hdr.id;
+		ci->capset_max_version = c->hdr.version;
+		ci->capset_max_size = c->hdr.size;
+		return VIRTIO_GPU_RESP_OK_CAPSET_INFO;
 	} else {
-		struct gpu_capdata *cp = NULL;
-		uint32_t version = 0u;
-
-		for (size_t i = 0u; i < g->ncapdata; i++) {
-			struct gpu_capdata *cd = &g->capdata[i];
-
-			if (capset_id == cd->hdr.id &&
-			    cd->hdr.version > version) {
-				version = cd->hdr.version;
-				cp = cd;
-			}
-		}
-		return cp;
+		return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
 	}
-	return NULL;
 }
 
 static size_t gpu_device_capset(struct gpu_device *g, unsigned int capset_id,
 				unsigned int capset_version,
 				struct virtio_gpu_resp_capset *c)
 {
-	struct gpu_capdata *cd =
-		gpu_device_find_capset(g, capset_id, capset_version);
-	if (cd) {
-		c->hdr.type = VIRTIO_GPU_RESP_OK_CAPSET;
-		memcpy(c->capset_data, cd->data, cd->hdr.size);
-		return sizeof(*c) + cd->hdr.size;
+	size_t i;
+
+	for (i = 0; i < g->ncapdata; i++) {
+		const struct gpu_capdata *cd = g->capdata + i;
+		if (cd->hdr.id == capset_id && cd->hdr.version == capset_version) {
+			memcpy(c->capset_data, cd->data, cd->hdr.size);
+			c->hdr.type = VIRTIO_GPU_RESP_OK_CAPSET;
+			return sizeof(*c) + cd->hdr.size;
+		}
 	}
 
 	c->hdr.type = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
 	return sizeof(c->hdr);
 }
 
-static uint64_t gpu_device_read_vsync(struct gpu_device *g)
-{
-	uint64_t res = 0;
-	ssize_t n;
-
-	if (g->vsync_fd == -1)
-		return 1;
-
-	n = read(g->vsync_fd, &res, sizeof(res));
-
-	if (n == -1 && errno == EAGAIN)
-		res = 0u;
-	else if (n != (ssize_t)sizeof(res))
-		err(1, "Invalid vsync read");
-
-	return res;
-}
-
 void backend_reset_state(struct rvgpu_ctx *ctx, enum reset_state state)
 {
+	(void)ctx;
 	gpu_reset_state = state;
 }
 
+#ifdef VSYNC_ENABLE
 static unsigned long delta_time_nsec(struct timespec start,
 				     struct timespec stop)
 {
@@ -864,7 +946,7 @@ static unsigned long delta_time_nsec(struct timespec start,
 static void set_timer(int timerfd, unsigned long framerate,
 		      unsigned long vsync_time)
 {
-	struct itimerspec ts = { { 0 } };
+	struct itimerspec ts = { { 0 }, { 0 } };
 
 	if (framerate > 0) {
 		unsigned long vsync_delta = 0, rate = 1000000000UL / framerate;
@@ -885,45 +967,37 @@ static void set_timer(int timerfd, unsigned long framerate,
 		fprintf(stderr, "Failed to set timerfd: %s\n", strerror(errno));
 }
 
-size_t gpu_device_serve_vsync(struct gpu_device *g)
+static uint64_t gpu_device_read_vsync(struct gpu_device *g)
+{
+	uint64_t res = 0;
+	ssize_t n;
+
+	if (g->vsync_fd == -1)
+		return 1;
+
+	n = read(g->vsync_fd, &res, sizeof(res));
+
+	if (n == -1 && errno == EAGAIN)
+		res = 0u;
+	else if (n != (ssize_t)sizeof(res))
+		err(1, "Invalid vsync read");
+
+	return res;
+}
+
+static size_t gpu_device_serve_vsync(struct gpu_device *g)
 {
 	struct async_resp *r = g->async_resp;
-	struct virtio_gpu_ctrl_hdr hdr;
 	struct cmd *cmd;
 	size_t processed = 0;
 
 	TAILQ_FOREACH(cmd, &r->async_cmds, cmds)
 	{
 		if (cmd->hdr.flags & VIRTIO_GPU_FLAG_VSYNC) {
-			memcpy(&hdr, &cmd->hdr, sizeof(hdr));
-			vqueue_send_response(&g->vq[0], &cmd->req, &hdr,
-					     sizeof(hdr));
+			vqueue_send_response(cmd->req, &cmd->hdr, sizeof(cmd->hdr));
 			TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
 			free(cmd);
 			processed++;
-		}
-	}
-	return processed;
-}
-
-static int gpu_device_serve_fences(struct gpu_device *g)
-{
-	struct async_resp *r = g->async_resp;
-	struct pollfd pfd;
-	int processed = 0;
-	uint32_t fence_id;
-
-	pfd.fd = r->fence_pipe[PIPE_READ];
-	pfd.events = POLLIN;
-
-	while (poll(&pfd, 1, 0) > 0) {
-		if (pfd.revents & POLLIN) {
-			int rc = read_all(r->fence_pipe[PIPE_READ], &fence_id,
-					  sizeof(fence_id));
-			if (rc != sizeof(fence_id))
-				warnx("read error: %d", rc);
-
-			processed += process_fences(g, fence_id);
 		}
 	}
 	return processed;
@@ -955,13 +1029,36 @@ static void gpu_device_trigger_vsync(struct gpu_device *g,
 
 	g->wait_vsync = 1;
 }
+#endif
+
+static int gpu_device_serve_fences(struct gpu_device *g)
+{
+	struct async_resp *r = g->async_resp;
+	struct pollfd pfd;
+	int processed = 0;
+	uint32_t fence_id;
+
+	pfd.fd = r->fence_pipe[PIPE_READ];
+	pfd.events = POLLIN;
+
+	while (poll(&pfd, 1, 0) > 0) {
+		if (pfd.revents & POLLIN) {
+			int rc = read_all(r->fence_pipe[PIPE_READ], &fence_id,
+					  sizeof(fence_id));
+			if (rc != sizeof(fence_id))
+				warnx("read error: %d", rc);
+
+			processed += process_fences(g, fence_id);
+		}
+	}
+	return processed;
+}
 
 static void gpu_device_serve_ctrl(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
 	static bool reset;
-	static struct timespec vsync_ts;
 
 	union {
 		struct virtio_gpu_ctrl_hdr hdr;
@@ -971,6 +1068,7 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		uint8_t data[4096];
 	} resp;
 	memset(&resp.hdr, 0, sizeof(resp.hdr));
+#ifdef VSYNC_ENABLE
 	if (g->wait_vsync) {
 		if (gpu_device_read_vsync(g) > 0u) {
 			g->wait_vsync = 0;
@@ -978,44 +1076,53 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 			set_timer(g->vsync_fd, 0, 0);
 		}
 	}
+#endif
 	kick += gpu_device_serve_fences(g);
-	while (vqueue_get_request(g->lo_fd, &g->vq[0], &g->ctrl)) {
+	while (1) {
+		struct vqueue_request *req;
 		size_t resp_len = sizeof(resp.hdr);
 		union virtio_gpu_cmd r;
 		struct rvgpu_header rhdr = {
-			.size = (uint32_t)iov_size(g->ctrl.r, g->ctrl.nr),
 			.idx = 0,
 			.flags = 0,
 		};
 
-		copy_from_iov(g->ctrl.r, g->ctrl.nr, &r, sizeof(r));
+		if (!vqueue_are_requests_available(&g->vq[0]))
+			break;
+
+		req = vqueue_get_request(g->lo_fd, &g->vq[0]);
+		if (!req)
+			errx(1, "out of memory");
+
+		rhdr.size = (uint32_t)iov_size(req->r, req->nr),
+
+		copy_from_iov(req->r, req->nr, &r, sizeof(r));
 
 		resp.hdr.flags = 0;
 		resp.hdr.fence_id = 0;
 		resp.hdr.type = sanity_check_gpu_ctrl(&r, rhdr.size, true);
 
 		if (resp.hdr.type == VIRTIO_GPU_RESP_OK_NODATA) {
+			bool notify_all = true;
 			size_t i;
 
 			if (r.hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
 				resp.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
 				resp.hdr.fence_id = r.hdr.fence_id;
 				resp.hdr.ctx_id = r.hdr.ctx_id;
-				add_resp(g, &resp.hdr, &g->ctrl);
+				add_resp(g, &resp.hdr, vqueue_request_ref(req));
 			}
 
-			if (b->plugin_v1.ops.rvgpu_ctx_send(
-				    &b->plugin_v1.ctx, &rhdr, sizeof(rhdr))) {
-				warn("short write");
-			}
-			for (i = 0u; i < g->ctrl.nr; i++) {
-				struct iovec *iov = &g->ctrl.r[i];
+			if (r.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
+				notify_all = false;
 
-				if (b->plugin_v1.ops.rvgpu_ctx_send(
-					    &b->plugin_v1.ctx, iov->iov_base,
-					    iov->iov_len)) {
-					warn("short write");
-				}
+			gpu_device_send_command(b, &rhdr, sizeof(rhdr),
+						notify_all);
+			for (i = 0u; i < req->nr; i++) {
+				struct iovec *iov = &req->r[i];
+
+				gpu_device_send_command(
+					b, iov->iov_base, iov->iov_len, notify_all);
 			}
 
 			/* command is sane, parse it */
@@ -1067,15 +1174,18 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				g->scan_id = r.s_set.scanout_id;
 				break;
 			case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+#ifdef VSYNC_ENABLE
 				if (r.r_flush.resource_id == g->scanres) {
+					static struct timespec vsync_ts;
 					if (gpu_device_read_vsync(g) == 0) {
 						gpu_device_trigger_vsync(
-							g, &resp.hdr, &g->ctrl,
+							g, &resp.hdr, vqueue_request_ref(req),
 							r.hdr.flags, vsync_ts);
 						clock_gettime(CLOCK_REALTIME,
 							      &vsync_ts);
 					}
 				}
+#endif
 				break;
 			case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 				resp.hdr.type = gpu_device_send_res(
@@ -1114,10 +1224,9 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 					g, r.r_det.resource_id);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET_INFO:
-				gpu_device_capset_info(
+				resp.hdr.type = gpu_device_capset_info(
 					g, r.capset_info.capset_index,
 					&resp.ci);
-				resp.hdr.type = VIRTIO_GPU_RESP_OK_CAPSET_INFO;
 				resp_len = sizeof(resp.ci);
 				break;
 			case VIRTIO_GPU_CMD_GET_CAPSET:
@@ -1135,9 +1244,10 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		}
 		if ((!(resp.hdr.flags & VIRTIO_GPU_FLAG_FENCE)) &&
 		    (!(resp.hdr.flags & VIRTIO_GPU_FLAG_VSYNC))) {
-			vqueue_send_response(&g->vq[0], &g->ctrl, &resp,
-					     resp_len);
+			vqueue_send_response(req, &resp, resp_len);
 			kick++;
+		} else {
+			vqueue_request_unref(req);
 		}
 	}
 	if (kick) {
@@ -1168,19 +1278,27 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
 	int kick = 0;
-	bool flush = false;
 
-	while (vqueue_get_request(g->lo_fd, &g->vq[1], &g->cursor)) {
+	while (1) {
+		struct vqueue_request *req;
 		union virtio_gpu_cmd r;
 		struct virtio_gpu_ctrl_hdr resp = { .flags = 0, .fence_id = 0 };
-		size_t cmdsize = iov_size(g->cursor.r, g->cursor.nr);
 		struct rvgpu_header rhdr = {
-			.size = (uint32_t)cmdsize,
 			.idx = 0,
 			.flags = RVGPU_CURSOR,
 		};
 
-		copy_from_iov(g->cursor.r, g->cursor.nr, &r, sizeof(r));
+		if (!vqueue_are_requests_available(&g->vq[1]))
+			break;
+
+		req = vqueue_get_request(g->lo_fd, &g->vq[1]);
+		if (!req)
+			errx(1, "out of memory");
+
+		size_t cmdsize = iov_size(req->r, req->nr);
+		rhdr.size = (uint32_t)cmdsize,
+
+		copy_from_iov(req->r, req->nr, &r, sizeof(r));
 
 		resp.type = sanity_check_gpu_cursor(&r, cmdsize, true);
 		if (resp.type == VIRTIO_GPU_RESP_OK_NODATA) {
@@ -1190,31 +1308,15 @@ static void gpu_device_serve_cursor(struct gpu_device *g)
 				resp.ctx_id = r.hdr.ctx_id;
 			}
 
-			if (b->plugin_v1.ops.rvgpu_ctx_send(
-				    &b->plugin_v1.ctx, &rhdr, sizeof(rhdr))) {
-				warn("short write");
-			}
-			for (unsigned int i = 0u; i < g->cursor.nr; i++) {
-				struct iovec *iov = &g->cursor.r[i];
+			gpu_device_send_command(b, &rhdr, sizeof(rhdr), true);
+			for (unsigned int i = 0u; i < req->nr; i++) {
+				struct iovec *iov = &req->r[i];
 
-				if (b->plugin_v1.ops.rvgpu_ctx_send(
-					    &b->plugin_v1.ctx, iov->iov_base,
-					    iov->iov_len)) {
-					warn("short write");
-				}
-			}
-
-			switch (r.hdr.type) {
-			case VIRTIO_GPU_CMD_UPDATE_CURSOR:
-				flush = true;
-				break;
-			default:
-			case VIRTIO_GPU_CMD_MOVE_CURSOR:
-				break;
+				gpu_device_send_command(b, iov->iov_base,
+							iov->iov_len, true);
 			}
 		}
-		vqueue_send_response(&g->vq[1], &g->cursor, &resp,
-				     sizeof(resp));
+		vqueue_send_response(req, &resp, sizeof(resp));
 		kick = 1;
 	}
 	if (kick) {

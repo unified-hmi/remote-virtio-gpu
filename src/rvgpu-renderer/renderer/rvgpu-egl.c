@@ -24,8 +24,6 @@
 
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 
-static struct rvgpu_scanout_params _sout_params;
-static bool _swap_skip;
 struct rect {
 	int x;
 	int y;
@@ -43,8 +41,6 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 				    8,
 				    EGL_BLUE_SIZE,
 				    8,
-				    EGL_ALPHA_SIZE,
-				    8,
 				    EGL_CONFORMANT,
 				    EGL_OPENGL_ES2_BIT,
 				    EGL_RENDERABLE_TYPE,
@@ -55,13 +51,43 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 
 	EGLint n = 0;
 	EGLBoolean res;
+	EGLConfig *configs;
 
 	res = eglInitialize(e->dpy, NULL, NULL);
 	assert(res);
+	(void)res;
 
 	eglBindAPI(EGL_OPENGL_ES_API);
-	eglChooseConfig(e->dpy, config_attribs, &e->config, 1, &n);
-	assert(n == 1);
+
+	eglChooseConfig(e->dpy, config_attribs, NULL, 0, &n);
+	assert(n > 0);
+
+	configs = calloc(n, sizeof(EGLConfig));
+	assert(configs);
+
+	eglChooseConfig(e->dpy, config_attribs, configs, n, &n);
+	assert(n > 0);
+
+	if (e->use_native_format) {
+		int config_index;
+		for (config_index = 0; config_index < n; config_index++) {
+			EGLint attr;
+
+			eglGetConfigAttrib(e->dpy, configs[config_index],
+			                   EGL_NATIVE_VISUAL_ID, &attr);
+			if ((uint32_t)attr == e->native_format)
+				break;
+		}
+		if (config_index == n)
+			err(1, "native format %d is not supported by EGL",
+			    e->native_format);
+
+		e->config = configs[config_index];
+	} else {
+		e->config = configs[0];
+	}
+
+	free(configs);
 
 	e->context =
 		eglCreateContext(e->dpy, e->config, EGL_NO_CONTEXT, ctxattr);
@@ -100,21 +126,9 @@ void rvgpu_egl_set_scanout(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		e->cb->set_scanout(e, s);
 }
 
-void rvgpu_egl_get_scanout_box(void *_box)
-{
-	struct rect *box = (struct rect *)_box;
-
-	box->x = _sout_params.box.x;
-	box->y = _sout_params.box.y;
-	box->width = _sout_params.box.w;
-	box->height = _sout_params.box.h;
-}
-
 void rvgpu_egl_create_scanout(struct rvgpu_egl_state *e,
 			      struct rvgpu_scanout *s)
 {
-	if (e->use_scissors)
-		_sout_params = s->params;
 	assert(e->cb->create_scanout);
 	e->cb->create_scanout(e, s);
 }

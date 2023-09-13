@@ -35,115 +35,77 @@
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu.h>
 
-int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
-		     struct rvgpu_scanout_arguments *args)
+struct poll_entries {
+	struct pollfd *ses_timer;
+	struct pollfd *recon_timer;
+	struct pollfd *cmd_host;
+	struct pollfd *cmd_pipe_in;
+	struct pollfd *res_host;
+	struct pollfd *res_pipe_in;
+};
+
+struct conninfo {
+	struct addrinfo *servinfo, *p;
+};
+
+static int reconnect_single(struct vgpu_host *host);
+
+static int reconnect_next(struct conninfo *ci)
 {
-	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
-	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
+	int fd;
 
-	struct vgpu_host *cmd = &ctx_priv->cmd[ctx_priv->cmd_count];
-	struct vgpu_host *res = &ctx_priv->res[ctx_priv->res_count];
-
-	cmd->tcp = &args->tcp;
-	cmd->host_p[PIPE_WRITE] = sc_priv->pipes[COMMAND].rcv_pipe[PIPE_WRITE];
-	cmd->host_p[PIPE_READ] = sc_priv->pipes[COMMAND].snd_pipe[PIPE_READ];
-	cmd->vpgu_p[PIPE_WRITE] = sc_priv->pipes[COMMAND].snd_pipe[PIPE_WRITE];
-	cmd->vpgu_p[PIPE_READ] = sc_priv->pipes[COMMAND].rcv_pipe[PIPE_READ];
-	ctx_priv->cmd_count++;
-
-	res->tcp = &args->tcp;
-	res->host_p[PIPE_WRITE] = sc_priv->pipes[RESOURCE].rcv_pipe[PIPE_WRITE];
-	res->host_p[PIPE_READ] = sc_priv->pipes[RESOURCE].snd_pipe[PIPE_READ];
-	res->vpgu_p[PIPE_WRITE] = sc_priv->pipes[RESOURCE].snd_pipe[PIPE_WRITE];
-	res->vpgu_p[PIPE_READ] = sc_priv->pipes[RESOURCE].rcv_pipe[PIPE_READ];
-	ctx_priv->res_count++;
-
-	return 0;
-}
-
-void free_communic_pipes(struct rvgpu_scanout *scanout)
-{
-	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
-
-	for (unsigned int i = 0; i < SOCKET_NUM; i++) {
-		close(sc_priv->pipes[i].rcv_pipe[PIPE_READ]);
-		close(sc_priv->pipes[i].rcv_pipe[PIPE_WRITE]);
-		close(sc_priv->pipes[i].snd_pipe[PIPE_READ]);
-		close(sc_priv->pipes[i].snd_pipe[PIPE_WRITE]);
-	}
-}
-
-int init_communic_pipes(struct rvgpu_scanout *scanout)
-{
-	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
-
-	for (int i = 0; i < SOCKET_NUM; i++) {
-		if (pipe2(sc_priv->pipes[i].rcv_pipe, 0) == -1) {
-			perror("pipe creation error");
-			return -1;
-		}
-		fcntl(sc_priv->pipes[i].rcv_pipe[0], F_SETPIPE_SZ, PIPE_SIZE);
-		if (pipe2(sc_priv->pipes[i].snd_pipe, 0) == -1) {
-			perror("pipe creation error");
-			return -1;
-		}
-		fcntl(sc_priv->pipes[i].snd_pipe[0], F_SETPIPE_SZ, PIPE_SIZE);
-	}
-	return 0;
-}
-
-static void reconnect_next(struct conninfo *ci, struct pollfd *pfd)
-{
 	if (ci->p != NULL)
 		ci->p = ci->p->ai_next;
 
 	if (ci->p == NULL)
 		ci->p = ci->servinfo;
 
-	pfd->fd = socket(ci->p->ai_family, ci->p->ai_socktype | SOCK_NONBLOCK,
-			 ci->p->ai_protocol);
-	if (pfd->fd == -1)
-		return;
+	fd = socket(ci->p->ai_family, ci->p->ai_socktype | SOCK_NONBLOCK,
+		    ci->p->ai_protocol);
+	if (fd == -1)
+		return -1;
 
 	int keepalive = 1;
 
-	if (setsockopt(pfd->fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
+	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt SO_KEEPALIVE");
 
 	int keepidle = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPIDLE, &keepidle,
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &keepidle,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPIDLE");
 
 	int keepintvl = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl,
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPINTVL");
 
 	int keepcnt = 1;
 
-	if (setsockopt(pfd->fd, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) !=
-	    0)
+	if (setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &keepcnt,
+		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPCNT");
 
 	int nodelay = 1;
 
-	if (setsockopt(pfd->fd, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay,
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
 		       sizeof(int)) != 0) {
 		err(1, "setsockopt TCP_NODELAY");
 	}
 
-	if (connect(pfd->fd, ci->p->ai_addr, ci->p->ai_addrlen) != -1 ||
+	if (connect(fd, ci->p->ai_addr, ci->p->ai_addrlen) != -1 ||
 	    errno != EINPROGRESS) {
-		close(pfd->fd);
-		pfd->fd = -1;
+		close(fd);
+		fd = -1;
 	}
+
+	return fd;
 }
 
-int wait_scanouts_init(struct ctx_priv *ctx)
+static int wait_scanouts_init(struct ctx_priv *ctx)
 {
 	struct timespec end;
 	uint16_t timeo_sec = 10;
@@ -152,6 +114,7 @@ int wait_scanouts_init(struct ctx_priv *ctx)
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	end.tv_sec += timeo_sec;
 
+	/* FIXME: wow, busy wait!!! */
 	do {
 		struct timespec now;
 
@@ -165,7 +128,7 @@ int wait_scanouts_init(struct ctx_priv *ctx)
 	return -1;
 }
 
-void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
+static void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 {
 	struct pollfd pfds[MAX_HOSTS];
 	struct conninfo cinfo[MAX_HOSTS];
@@ -194,7 +157,7 @@ void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 			warnx("getaddrinfo %s", gai_strerror(res));
 			continue;
 		}
-		reconnect_next(&cinfo[i], &pfds[i]);
+		pfds[i].fd = reconnect_next(&cinfo[i]);
 	}
 
 	do {
@@ -225,7 +188,7 @@ void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 					pfds[i].fd = -1;
 				} else {
 					close(pfds[i].fd);
-					reconnect_next(&cinfo[i], &pfds[i]);
+					pfds[i].fd = reconnect_next(&cinfo[i]);
 					wait_more = true;
 				}
 			} else {
@@ -243,7 +206,7 @@ void connect_hosts(struct vgpu_host *conn, uint16_t count, uint16_t timeo_s)
 	}
 }
 
-int reconnect_single(struct vgpu_host *host)
+static int reconnect_single(struct vgpu_host *host)
 {
 	struct conninfo cinfo;
 	struct addrinfo hints = {
@@ -267,7 +230,7 @@ int reconnect_single(struct vgpu_host *host)
 		.events = POLLOUT,
 	};
 
-	reconnect_next(&cinfo, &pfd);
+	pfd.fd = reconnect_next(&cinfo);
 
 	poll(&pfd, 1, 10);
 
@@ -296,7 +259,7 @@ int reconnect_single(struct vgpu_host *host)
 	return sockfd;
 }
 
-void close_conn(struct vgpu_host *vhost)
+static void close_conn(struct vgpu_host *vhost)
 {
 	if (vhost->pfd) {
 		if (vhost->pfd->fd > 0) {
@@ -309,7 +272,7 @@ void close_conn(struct vgpu_host *vhost)
 	vhost->state = HOST_DISCONNECTED;
 }
 
-void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
+static void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
 {
 	for (unsigned int i = 0; i < count; i++) {
 		if (vhost[i]->state != HOST_RECONNECTED) {
@@ -320,7 +283,16 @@ void reconnect_all(struct vgpu_host *vhost[], unsigned int count)
 	}
 }
 
-void set_timer(int timerfd, unsigned int msec)
+static int init_timer(void)
+{
+	int timer = timerfd_create(CLOCK_MONOTONIC, 0);
+
+	assert(timer != -1);
+	return timer;
+}
+
+
+static void set_timer(int timerfd, unsigned int msec)
 {
 	struct itimerspec ts = { .it_value = { msec / 1000,
 					       (msec % 1000) * 1000000 } };
@@ -344,7 +316,7 @@ void rvgpu_ctx_wakeup(struct ctx_priv *ctx)
 	pthread_mutex_unlock(&ctx->reset.lock);
 }
 
-void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
+static void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
 		unsigned int res_cnt, unsigned int idx)
 {
 	if (cmd_cnt) {
@@ -361,7 +333,7 @@ void disconnect(struct vgpu_host *vhost[], unsigned int cmd_cnt,
 	}
 }
 
-void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
+static void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
 
@@ -369,7 +341,7 @@ void process_reset_backend(struct rvgpu_ctx *ctx, enum reset_state state)
 		ctx_priv->gpu_reset_cb(ctx, state);
 }
 
-void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
+static void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 		  unsigned int host_count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
@@ -381,7 +353,8 @@ void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	ctx_priv->reset.state = GPU_RESET_NONE;
 	if (ctx_priv->gpu_reset_cb)
 		ctx_priv->gpu_reset_cb(ctx, GPU_RESET_NONE);
-	/* FIXME: Without this delay, rvgpu-proxy will not
+	/*
+	 * FIXME: Without this delay, rvgpu-proxy will not
 	 * wait for subscriber creation in rvgpu-renderer. This
 	 * may lead rvgpu-renderer to miss resources from rvgpu-proxy.
 	 */
@@ -389,7 +362,7 @@ void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	rvgpu_ctx_wakeup(ctx_priv);
 }
 
-bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
+static bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 		   unsigned int *active_sessions, unsigned int count)
 {
 	bool ses_hung = false;
@@ -410,7 +383,7 @@ bool sessions_hung(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 	return ses_hung;
 }
 
-bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
+static bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 			int reconn_fd, unsigned int count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
@@ -434,22 +407,15 @@ bool sessions_reconnect(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	return reconnected;
 }
 
-int init_timer(void)
-{
-	int timer = timerfd_create(CLOCK_MONOTONIC, 0);
-
-	assert(timer != -1);
-	return timer;
-}
-
-unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
+static unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
 			  struct pollfd **ses_timer,
 			  struct pollfd **recon_timer, struct pollfd **cmd_host,
 			  struct pollfd **cmd_pipe, struct pollfd **res_host,
 			  struct pollfd **res_pipe)
 {
 	unsigned int pfd_count = 0;
-	/* set pointers as following. Ex: for 2 targets
+	/*
+	 * set pointers as following. Ex: for 2 targets
 	 * 0 - session timer
 	 * 1 - recconnect timer
 	 * 2 - command host 0
@@ -477,7 +443,7 @@ unsigned int get_pointers(struct ctx_priv *ctx, struct pollfd *pfd,
 	return pfd_count;
 }
 
-unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
+static unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 		     struct pollfd *pfd, struct poll_entries *p_entry)
 {
 	unsigned int pfd_count =
@@ -524,229 +490,12 @@ unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 	return pfd_count;
 }
 
-unsigned int get_input_ev(struct pollfd *pipe_in, unsigned int count)
-{
-	unsigned int in_pipes = 0;
-
-	for (unsigned int i = 0; i < count; i++) {
-		if (pipe_in[i].revents & POLLIN)
-			in_pipes++;
-	}
-	return in_pipes;
-}
-
-int write_all(int fd, const void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t written =
-			write(fd, (const char *)buf + offset, bytes - offset);
-		if (written > 0) {
-			offset += (size_t)written;
-		} else if (written == 0) {
-			warnx("Connection was closed");
-			return -1;
-		} else if (errno != EAGAIN) {
-			warn("Error while writing to socket");
-			return -1;
-		}
-	}
-	return 0;
-}
-
-int read_all(int fd, void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t r = read(fd, (char *)buf + offset, bytes - offset);
-
-		if (r > 0) {
-			offset += (size_t)r;
-		} else if (r == 0) {
-			warnx("Connection was closed");
-			return -1;
-		} else if (errno != EAGAIN) {
-			warn("Error while reading from socket");
-			return -1;
-		}
-	}
-	return 0;
-}
-
-unsigned int handle_host_comm(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
-			      struct poll_entries *p_entry, int devnull)
-{
-	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
-	struct pollfd *cmd_host = p_entry->cmd_host;
-	struct pollfd *pipe_in = p_entry->cmd_pipe_in;
-	unsigned int sent = 0;
-
-	for (unsigned int i = 0; i < ctx_priv->cmd_count; i++) {
-		if (cmd_host[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-			disconnect(vhost, ctx_priv->cmd_count,
-				   ctx_priv->res_count, i);
-			process_reset_backend(ctx, GPU_RESET_TRUE);
-			set_timer(p_entry->recon_timer->fd,
-				  ctx_priv->args.reconn_intv_ms);
-		}
-		if (cmd_host[i].revents & POLLOUT) {
-			int ret = splice(pipe_in[i].fd, NULL, cmd_host[i].fd,
-					 NULL, PIPE_SIZE, 0);
-			if (ret == -1) {
-				warnx("wr: spile error %s fd %d",
-				      strerror(errno), cmd_host[i].fd);
-				disconnect(vhost, ctx_priv->cmd_count,
-					   ctx_priv->res_count, i);
-				process_reset_backend(ctx, GPU_RESET_TRUE);
-				set_timer(p_entry->recon_timer->fd,
-					  ctx_priv->args.reconn_intv_ms);
-			}
-			cmd_host[i].events &= ~POLLOUT;
-			sent++;
-		}
-		if (cmd_host[i].revents & POLLIN) {
-			int ret = splice(cmd_host[i].fd, NULL,
-					 ctx_priv->cmd[i].host_p[PIPE_WRITE],
-					 NULL, PIPE_SIZE, 0);
-			if (ret == -1) {
-				warnx("rd: spile error %s", strerror(errno));
-				disconnect(vhost, ctx_priv->cmd_count,
-					   ctx_priv->res_count, i);
-				process_reset_backend(ctx, GPU_RESET_TRUE);
-				set_timer(p_entry->recon_timer->fd,
-					  ctx_priv->args.reconn_intv_ms);
-			}
-		}
-		if (cmd_host[i].fd < 0) {
-			splice(pipe_in[i].fd, NULL, devnull, NULL, PIPE_SIZE,
-			       SPLICE_F_NONBLOCK);
-		}
-	}
-	return sent;
-}
-
-unsigned int handle_host_res(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
-			     struct poll_entries *p_entry, int devnull)
-{
-	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
-	struct pollfd *res_host = p_entry->res_host;
-	struct pollfd *pipe_in = p_entry->res_pipe_in;
-	unsigned int sent = 0;
-
-	for (unsigned int i = 0; i < ctx_priv->res_count; i++) {
-		if (res_host[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-			disconnect(vhost, ctx_priv->cmd_count,
-				   ctx_priv->res_count, i);
-			process_reset_backend(ctx, GPU_RESET_TRUE);
-			set_timer(p_entry->recon_timer->fd,
-				  ctx_priv->args.reconn_intv_ms);
-		}
-		if (res_host[i].revents & POLLOUT &&
-		    pipe_in[i].revents & POLLIN) {
-			int ret = splice(pipe_in[i].fd, NULL, res_host[i].fd,
-					 NULL, PIPE_SIZE, 0);
-			if (ret == -1) {
-				warnx("wr: spile error %s", strerror(errno));
-				disconnect(vhost, ctx_priv->cmd_count,
-					   ctx_priv->res_count, i);
-				process_reset_backend(ctx, GPU_RESET_TRUE);
-				set_timer(p_entry->recon_timer->fd,
-					  ctx_priv->args.reconn_intv_ms);
-			}
-			sent++;
-		}
-		if (res_host[i].revents & POLLIN) {
-			int ret = splice(res_host[i].fd, NULL,
-					 ctx_priv->res[i].host_p[PIPE_WRITE],
-					 NULL, PIPE_SIZE, 0);
-			if (ret == -1) {
-				disconnect(vhost, ctx_priv->cmd_count,
-					   ctx_priv->res_count, i);
-				process_reset_backend(ctx, GPU_RESET_TRUE);
-				set_timer(p_entry->recon_timer->fd,
-					  ctx_priv->args.reconn_intv_ms);
-			}
-		}
-		if (res_host[i].fd < 0) {
-			splice(pipe_in[i].fd, NULL, devnull, NULL, PIPE_SIZE,
-			       SPLICE_F_NONBLOCK);
-		}
-	}
-	return sent;
-}
-
-void disable_input(struct pollfd *pipe_in, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		pipe_in[i].events &= ~POLLIN;
-}
-
-void enable_input(struct pollfd *pipe_in, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		pipe_in[i].events |= POLLIN;
-}
-
-void set_in_out(struct pollfd *host, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		host[i].events = POLLIN | POLLOUT;
-}
-
-void set_in(struct pollfd *host, unsigned int count)
-{
-	for (unsigned int i = 0; i < count; i++)
-		host[i].events = POLLIN;
-}
-
-void flush_input_pipes(struct ctx_priv *ctx, int devnull, enum pipe_type p)
-{
-	struct vgpu_host *cmd = ctx->cmd;
-	struct vgpu_host *res = ctx->res;
-	struct pollfd pipe_in[MAX_HOSTS];
-	unsigned int host_count = 0;
-
-	if (p == COMMAND) {
-		for (unsigned int i = 0; i < ctx->cmd_count; i++) {
-			pipe_in[i].fd = cmd[i].host_p[PIPE_READ];
-			pipe_in[i].events = POLLIN;
-		}
-		host_count = ctx->cmd_count;
-	}
-	if (p == RESOURCE) {
-		for (unsigned int i = 0; i < ctx->res_count; i++) {
-			pipe_in[i].fd = res[i].host_p[PIPE_READ];
-			pipe_in[i].events = POLLIN;
-		}
-		host_count = ctx->res_count;
-	}
-
-	if (!host_count)
-		return;
-
-	while (1) {
-		int rc = poll(pipe_in, host_count, 0);
-
-		if (!rc)
-			return;
-		for (unsigned int i = 0; i < host_count; i++) {
-			if (pipe_in[i].revents & POLLIN)
-				splice(pipe_in[i].fd, NULL, devnull, NULL,
-				       PIPE_SIZE, SPLICE_F_NONBLOCK);
-		}
-	}
-}
-
-void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
+static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 		   int cmd_count, int res_count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
 
-	/*
-     * Handle Virtio-GPU commands
-     */
+	/* Handle Virtio-GPU commands */
 	for (int i = 0; i < cmd_count; i++) {
 		if (p_entry->cmd_pipe_in[i].revents & POLLIN) {
 			p_entry->cmd_pipe_in[i].events &= ~POLLIN;
@@ -771,9 +520,7 @@ void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 		}
 	}
 
-	/*
-     * Handle resources and fences
-     */
+	/* Handle resources and fences */
 	for (int i = 0; i < res_count; i++) {
 		if (p_entry->res_pipe_in[i].revents & POLLIN) {
 			p_entry->res_pipe_in[i].events &= ~POLLIN;

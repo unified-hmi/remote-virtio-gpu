@@ -45,7 +45,7 @@
 #define CAPSET_PATH "/etc/virgl.capset"
 #define VIRTIO_LO_PATH "/dev/virtio-lo"
 
-enum { PROXY_GPU_CONFIG, PROXY_GPU_QUEUES, PROXY_INPUT_EVENT };
+enum { PROXY_GPU_CONFIG, PROXY_GPU_QUEUES };
 
 struct host_server {
 	char *hostname;

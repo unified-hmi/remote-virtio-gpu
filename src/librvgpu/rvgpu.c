@@ -33,6 +33,63 @@
 
 const uint32_t rvgpu_backend_version = 1;
 
+static void free_communic_pipes(struct rvgpu_scanout *scanout)
+{
+	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
+
+	for (unsigned int i = 0; i < SOCKET_NUM; i++) {
+		close(sc_priv->pipes[i].rcv_pipe[PIPE_READ]);
+		close(sc_priv->pipes[i].rcv_pipe[PIPE_WRITE]);
+		close(sc_priv->pipes[i].snd_pipe[PIPE_READ]);
+		close(sc_priv->pipes[i].snd_pipe[PIPE_WRITE]);
+	}
+}
+
+static int init_communic_pipes(struct rvgpu_scanout *scanout)
+{
+	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
+
+	for (int i = 0; i < SOCKET_NUM; i++) {
+		if (pipe2(sc_priv->pipes[i].rcv_pipe, 0) == -1) {
+			perror("pipe creation error");
+			return -1;
+		}
+		fcntl(sc_priv->pipes[i].rcv_pipe[0], F_SETPIPE_SZ, PIPE_SIZE);
+		if (pipe2(sc_priv->pipes[i].snd_pipe, 0) == -1) {
+			perror("pipe creation error");
+			return -1;
+		}
+		fcntl(sc_priv->pipes[i].snd_pipe[0], F_SETPIPE_SZ, PIPE_SIZE);
+	}
+	return 0;
+}
+
+static int init_tcp_scanout(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
+		     struct rvgpu_scanout_arguments *args)
+{
+	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
+	struct sc_priv *sc_priv = (struct sc_priv *)scanout->priv;
+
+	struct vgpu_host *cmd = &ctx_priv->cmd[ctx_priv->cmd_count];
+	struct vgpu_host *res = &ctx_priv->res[ctx_priv->res_count];
+
+	cmd->tcp = &args->tcp;
+	cmd->host_p[PIPE_WRITE] = sc_priv->pipes[COMMAND].rcv_pipe[PIPE_WRITE];
+	cmd->host_p[PIPE_READ] = sc_priv->pipes[COMMAND].snd_pipe[PIPE_READ];
+	cmd->vpgu_p[PIPE_WRITE] = sc_priv->pipes[COMMAND].snd_pipe[PIPE_WRITE];
+	cmd->vpgu_p[PIPE_READ] = sc_priv->pipes[COMMAND].rcv_pipe[PIPE_READ];
+	ctx_priv->cmd_count++;
+
+	res->tcp = &args->tcp;
+	res->host_p[PIPE_WRITE] = sc_priv->pipes[RESOURCE].rcv_pipe[PIPE_WRITE];
+	res->host_p[PIPE_READ] = sc_priv->pipes[RESOURCE].snd_pipe[PIPE_READ];
+	res->vpgu_p[PIPE_WRITE] = sc_priv->pipes[RESOURCE].snd_pipe[PIPE_WRITE];
+	res->vpgu_p[PIPE_READ] = sc_priv->pipes[RESOURCE].rcv_pipe[PIPE_READ];
+	ctx_priv->res_count++;
+
+	return 0;
+}
+
 int rvgpu_ctx_send(struct rvgpu_ctx *ctx, const void *buf, size_t len)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
@@ -112,7 +169,7 @@ int rvgpu_send(struct rvgpu_scanout *scanout, enum pipe_type p, const void *buf,
 	 * NONBLOCKING mode, write will return EAGAIN. Backend device
 	 * should ignore this.
 	 */
-	return ((rc != len) && (errno == EAGAIN)) ? len : rc;
+	return ((rc == -1) && (errno == EAGAIN)) ? (int)len : rc;
 }
 
 int rvgpu_init(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout,
@@ -160,6 +217,7 @@ error:
 
 void rvgpu_destroy(struct rvgpu_ctx *ctx, struct rvgpu_scanout *scanout)
 {
+	(void)ctx;
 	if (scanout) {
 		free_communic_pipes(scanout);
 		free(scanout->priv);

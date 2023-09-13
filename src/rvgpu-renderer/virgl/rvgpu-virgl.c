@@ -128,6 +128,7 @@ static void virgl_write_fence(void *opaque, uint32_t fence)
 	int res = write_all(state->res_socket, &msg,
 			    sizeof(struct rvgpu_res_message_header));
 	assert(res >= 0);
+	(void)res;
 }
 
 static struct virgl_renderer_callbacks virgl_cbs = {
@@ -284,7 +285,7 @@ resource_attach_backing(struct virtio_gpu_resource_attach_backing *r,
 
 static void load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
 {
-	struct rvgpu_patch header = { 0, 0 };
+	struct rvgpu_patch header = { 0, 0, 0 };
 	int stream = COMMAND;
 	uint32_t offset = 0;
 
@@ -321,6 +322,64 @@ static bool load_resource(struct rvgpu_pr_state *state, unsigned int res_id)
 	}
 
 	return load;
+}
+
+static void write_to_socket(int socket, char *buf, size_t size)
+{
+	size_t offset = 0;
+	ssize_t ret = 0;
+	struct pollfd pfd;
+
+	while (offset < size) {
+		pfd.fd = socket;
+		pfd.events = POLLOUT;
+		poll(&pfd, 1, -1);
+
+		if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+			err(1, "Resource socket error write_to_socket");
+		}
+
+		ret = write(socket, buf + offset, size - offset);
+
+		if (ret == (ssize_t)size)
+			break;
+
+		if (ret <= 0)
+			err(1, "Short read res pipe");
+
+		offset += ret;
+		if (offset > size)
+			err(1, "Buffer overflow");
+	}
+}
+
+static void upload_resource(struct rvgpu_pr_state *state,
+			    struct virtio_gpu_transfer_host_3d *t)
+{
+	struct iovec *p = NULL;
+	int iovn = 0;
+	struct rvgpu_res_message_header transfer = {.type = RVGPU_RES_TRANSFER};
+	struct rvgpu_header header = {
+	    .size = sizeof(struct virtio_gpu_transfer_host_3d)};
+	struct rvgpu_patch patch;
+
+	virgl_renderer_resource_detach_iov(t->resource_id, &p, &iovn);
+	if (p == NULL)
+		err(1, "invalid resource transfer");
+
+	write_to_socket(state->res_socket, (char *)&transfer, sizeof(transfer));
+	write_to_socket(state->res_socket, (char *)&header, sizeof(header));
+	write_to_socket(state->res_socket, (char *)t,
+			sizeof(struct virtio_gpu_transfer_host_3d));
+
+	patch.offset = t->offset;
+	patch.len = p[0].iov_len - patch.offset;
+
+	write_to_socket(state->res_socket, (char *)&patch, sizeof(patch));
+	write_to_socket(state->res_socket, (char *)p[0].iov_base + patch.offset,
+			patch.len);
+
+	virgl_renderer_resource_attach_iov(t->resource_id, p, iovn);
 }
 
 static void set_scanout(struct rvgpu_pr_state *p,
@@ -372,23 +431,34 @@ static void clear_scanout(struct rvgpu_pr_state *p, struct rvgpu_scanout *s)
 
 static void dump_capset(struct rvgpu_pr_state *p)
 {
-	for (unsigned int id = 1;; id++) {
+	/*
+	 * First argument for virgl_renderer_get_cap_set()
+	 * is for backend id, we support only
+	 * VIRTIO_GPU_CAPSET_VIRGL (== 1)
+	 * but let's also dump
+	 * VIRTIO_GPU_CAPSET_VIRGL2 (== 2)
+	 * to be ready to move to the next version.
+	 */
+	uint32_t ids[] = {VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2};
+	long unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ids) ; i++) {
 		uint32_t maxver, maxsize;
 
-		virgl_renderer_get_cap_set(id, &maxver, &maxsize);
-		if (maxsize == 0 || maxsize >= 1024) {
-			warnx("Error while getting capset %u", id);
+		virgl_renderer_get_cap_set(ids[i], &maxver, &maxsize);
+		if (maxsize == 0 || maxsize >= CAPSET_MAX_SIZE) {
+			warnx("Error while getting capset %u (maxsize=%u)", ids[i], maxsize);
 			break;
 		}
 
-		for (unsigned int version = 1; version <= maxver; version++) {
-			struct capset hdr = { .id = id,
+		for (unsigned int version = 0; version <= maxver; version++) {
+			struct capset hdr = { .id = ids[i],
 					      .version = version,
 					      .size = maxsize };
-			uint8_t data[1024];
+			static uint8_t data[CAPSET_MAX_SIZE];
 
 			memset(data, 0, maxsize);
-			virgl_renderer_fill_caps(id, version, data);
+			virgl_renderer_fill_caps(ids[i], version, data);
 			hdr.size = maxsize;
 
 			if (fwrite(&hdr, sizeof(hdr), 1, p->pp.capset) != 1)
@@ -397,7 +467,7 @@ static void dump_capset(struct rvgpu_pr_state *p)
 			if (fwrite(data, maxsize, 1, p->pp.capset) != 1)
 				warn("Error while dumping capset");
 
-			warnx("capset dumped for id %u version %u size %u", id,
+			warnx("capset dumped for id %u version %u size %u", ids[i],
 			      version, maxsize);
 		}
 	}
@@ -592,6 +662,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 					r.t_h3d.layer_stride,
 					(struct virgl_box *)&r.t_h3d.box,
 					r.t_h3d.offset, NULL, 0);
+				upload_resource(p, &r.t_h3d);
 			} else {
 				errx(1, "Invalid box transfer");
 			}

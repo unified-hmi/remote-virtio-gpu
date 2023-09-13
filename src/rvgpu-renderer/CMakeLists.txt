@@ -23,6 +23,7 @@ add_executable(rvgpu-renderer
 	renderer/rvgpu-input.c
 	virgl/rvgpu-virgl.c
 	ivi/ivi-application-client-protocol.c
+	shell/xdg-shell-client-protocol.c
 	rvgpu-renderer.c
 	$<TARGET_OBJECTS:rvgpu-sanity>)
 target_include_directories(rvgpu-renderer
