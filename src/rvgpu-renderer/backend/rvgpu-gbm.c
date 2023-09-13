@@ -397,6 +397,56 @@ static void rvgpu_gbm_process_events(struct rvgpu_egl_state *e, const void *ev,
 	}
 }
 
+/*
+ * These are drmModeDumbBuffer*() functions from libdrm that were added in
+ * libdrm-2.4.114 (see 3be3b1a8).  This is to compile everything on
+ * Ubuntu 20.04
+ */
+static inline int DRM_IOCTL_COMPAT(int fd, unsigned long cmd, void *arg)
+{
+	int ret = drmIoctl(fd, cmd, arg);
+	return ret < 0 ? -errno : ret;
+}
+
+static int
+drmModeCreateDumbBufferCompat(int fd, uint32_t width, uint32_t height, uint32_t bpp,
+                        uint32_t flags, uint32_t *handle, uint32_t *pitch,
+                        uint64_t *size)
+{
+	int ret;
+	struct drm_mode_create_dumb create = {
+		.width = width,
+		.height = height,
+		.bpp = bpp,
+		.flags = flags,
+	};
+
+	ret = DRM_IOCTL_COMPAT(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create);
+	if (ret != 0)
+		return ret;
+
+	*handle = create.handle;
+	*pitch = create.pitch;
+	*size = create.size;
+	return 0;
+}
+
+static int
+drmModeMapDumbBufferCompat(int fd, uint32_t handle, uint64_t *offset)
+{
+	int ret;
+	struct drm_mode_map_dumb map = {
+		.handle = handle,
+	};
+
+	ret = DRM_IOCTL_COMPAT(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
+	if (ret != 0)
+		return ret;
+
+	*offset = map.offset;
+	return 0;
+}
+
 static int rvgpu_cursor_init(struct rvgpu_gbm_state *g)
 {
 	uint64_t value;
@@ -417,11 +467,14 @@ static int rvgpu_cursor_init(struct rvgpu_gbm_state *g)
 		g->cursor_h = value;
 	}
 
-	err = drmModeCreateDumbBuffer(g->gbm_fd, g->cursor_w, g->cursor_h, 32, 0, &g->cursor_handle, &pitch, &g->cursor_size);
+	err = drmModeCreateDumbBufferCompat(g->gbm_fd, g->cursor_w,
+					    g->cursor_h, 32, 0,
+					    &g->cursor_handle, &pitch,
+					    &g->cursor_size);
 	if (err)
 		return err;
 
-	err = drmModeMapDumbBuffer(g->gbm_fd, g->cursor_handle, &offset);
+	err = drmModeMapDumbBufferCompat(g->gbm_fd, g->cursor_handle, &offset);
 	if (err)
 		return err;
 
@@ -433,6 +486,21 @@ static int rvgpu_cursor_init(struct rvgpu_gbm_state *g)
 }
 
 #if 0
+/*
+ * FIXME: Implement rvgpu_gbm_done()
+ * and use these finalization functions there
+ */
+
+static int
+drmModeDestroyDumbBufferCompat(int fd, uint32_t handle)
+{
+	struct drm_mode_destroy_dumb destroy = {
+		.handle = handle,
+	};
+
+	return DRM_IOCTL_COMPAT(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+}
+
 static void rvgpu_cursor_done(struct rvgpu_gbm_state *g)
 {
 	int err;
@@ -441,7 +509,7 @@ static void rvgpu_cursor_done(struct rvgpu_gbm_state *g)
 	if (err)
 		return;
 
-	drmModeDestroyDumbBuffer(g->gbm_fd, g->cursor_handle);
+	drmModeDestroyDumbBufferCompat(g->gbm_fd, g->cursor_handle);
 }
 #endif
 
