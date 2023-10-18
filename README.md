@@ -100,7 +100,7 @@ For instructions on how to install Virtio-loopback-driver, please refer to the [
 
 # How to Install Weston
 
-The operation of RVGPU can be tested using Weston version 8.0.93 or above.
+The operation of RVGPU can be tested using Weston version 8.0.93 or above.  
 Install Weston-8.0.93
 ```
 sudo apt install libjpeg-dev libwebp-dev libsystemd-dev libpam-dev libva-dev freerdp2-dev \
