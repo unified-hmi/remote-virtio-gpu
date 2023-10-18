@@ -13,6 +13,7 @@
     - [Building from Source](#building-from-source)
     - [Binary-only Install](#binary-only-install)
   - [How to install Virtio-loopback-driver](#how-to-install-virtio-loopback-driver)
+  - [How to Install Weston](#how-to-install-weston)
   - [Run RVGPU](#run-rvgpu)
     - [Run `rvgpu-renderer` on Wayland](#run-rvgpu-renderer-on-wayland)
     - [Run `rvgpu-proxy`](#run-rvgpu-proxy)
@@ -40,7 +41,8 @@
 
 The install instructions described here are tested on Ubuntu 20.04 LTS AMD64.
 However you can try it with different Linux distros with Wayland display
-server. Install a clean version of Ubuntu 20.04 and then follow the steps below.  
+server. Assuming, you have a clean Ubuntu 20.04 installed, perform the
+following steps.  
 You have two options for installing RVGPU: either build from source code ([Building from Source](#building-from-source)) or install from a binary ([Binary-only Install](#binary-only-install)).
 
 ## Building from Source
@@ -96,6 +98,24 @@ You have two options for installing RVGPU: either build from source code ([Build
 When using RVGPU, this module is also necessary.  
 For instructions on how to install Virtio-loopback-driver, please refer to the [README](https://github.com/unified-hmi/virtio-loopback-driver).
 
+# How to Install Weston
+
+The operation of RVGPU can be tested using Weston version 8.0.93 or above.
+Install Weston-8.0.93
+```
+sudo apt install libjpeg-dev libwebp-dev libsystemd-dev libpam-dev libva-dev freerdp2-dev \
+               libxcb-composite0-dev liblcms2-dev libcolord-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.2-dev \
+               libxml2-dev meson libxkbcommon-x11-dev libpixman-1-dev libinput-dev libdrm-dev wayland-protocols libcairo2-dev \
+               libpango1.0-dev libdbus-1-dev libgbm-dev libxcursor-dev
+
+wget https://wayland.freedesktop.org/releases/weston-8.0.93.tar.xz
+tar -xf weston-8.0.93.tar.xz
+cd ~/weston-8.0.93/
+meson build/
+sudo ninja -C build/ install
+sudo ldconfig
+``` 
+
 # Run RVGPU
 
 RVGPU software consists of client (`rvgpu-proxy`) and server (`rvgpu-renderer`).
@@ -123,10 +143,9 @@ After this command, launching rvgpu-proxy will make the rvgpu-renderer create a 
 
 ### Using Ubuntu (default)
 You can launch a dedicated instance of Weston and run `rvgpu-renderer`
-inside it.  To do that install `weston`:
+inside it.
 
 ```
-sudo apt install weston
 weston --width 2200 --height 1200 &
 rvgpu-renderer -b 1280x720@0,0 -p 55667
 ```
@@ -155,25 +174,7 @@ After you run this, another GPU node `/dev/dri/cardX` appear.
 Also, if you are running `rvgpu-renderer` in Wayland mode, it create 
 a new window.
 
-You can test the new gpu node for example running Weston-8.0.93 on it:
-
-Install Weston-8.0.93
-```
-sudo apt install libjpeg-dev libwebp-dev libsystemd-dev libpam-dev libva-dev freerdp2-dev \
-               libxcb-composite0-dev liblcms2-dev libcolord-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.2-dev \
-               libxml2-dev meson libxkbcommon-x11-dev libpixman-1-dev libinput-dev libdrm-dev wayland-protocols libcairo2-dev \
-               libpango1.0-dev libdbus-1-dev libgbm-dev libxcursor-dev
-
-wget https://wayland.freedesktop.org/releases/weston-8.0.93.tar.xz
-tar -xf weston-8.0.93.tar.xz
-cd ~/weston-8.0.93/
-meson build/
-sudo ninja -C build/ install
-sudo ldconfig
-```
-**Note:** `sudo apt install weston` provides Weston 8.0.0, but for RVGPU, use Weston 8.0.93 for correct initialization.  
-
-Run Weston-8.0.93
+You can test the new gpu node for example running Weston-8.0.93 on it: 
 ```
 export XDG_RUNTIME_DIR=/tmp
 weston --backend drm-backend.so --tty=2 --seat=seat_virtual -i 0
