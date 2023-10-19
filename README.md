@@ -1,16 +1,19 @@
-# Remote VIRTIO GPU
+# Remote VIRTIO GPU (RVGPU)
 
-> Remote VIRTIO GPU is a client-server based rendering engine,
+> Remote VIRTIO GPU (RVGPU) is a client-server based rendering engine,
 > which allows to render 3D on one device (client) and display it via network
 > on another device (server)
 
 ## Contents
 
-- [Remote VIRTIO GPU](#remote-virtio-gpu)
+- [Remote VIRTIO GPU (RVGPU)](#remote-virtio-gpu-rvgpu)
   - [Contents](#contents)
   - [Repository structure](#repository-structure)
-  - [Build instructions](#build-instructions)
-  - [Installation instructions](#installation-instructions)
+  - [How to install RVGPU](#how-to-install-rvgpu)
+    - [Building from Source](#building-from-source)
+    - [Binary-only Install](#binary-only-install)
+  - [How to install Virtio-loopback-driver](#how-to-install-virtio-loopback-driver)
+  - [How to Install Weston](#how-to-install-weston)
   - [Run RVGPU](#run-rvgpu)
     - [Run `rvgpu-renderer` on Wayland](#run-rvgpu-renderer-on-wayland)
     - [Run `rvgpu-proxy`](#run-rvgpu-proxy)
@@ -34,13 +37,15 @@
 │    ├── rvgpu-renderer            # rvgpu-renderer source files
 │    ├── rvgpu-sanity              # sanity module source files
 ```
+# How to Install RVGPU
 
-## Build instructions
-
-The build instructions described here are tested on Ubuntu 20.04 LTS AMD64.
+The install instructions described here are tested on Ubuntu 20.04 LTS AMD64.
 However you can try it with different Linux distros with Wayland display
 server. Assuming, you have a clean Ubuntu 20.04 installed, perform the
-following steps:
+following steps.  
+You have two options for installing RVGPU: either build from source code ([Building from Source](#building-from-source)) or install from a binary ([Binary-only Install](#binary-only-install)).
+
+## Building from Source
 
 - Install the build prerequisites
 
@@ -48,155 +53,140 @@ following steps:
   sudo apt install cmake pkg-config libvirglrenderer-dev libegl-dev libgles-dev libwayland-dev libgbm-dev libdrm-dev libinput-dev
   ```
 
-- Install the header for `virtio-lo` kernel driver
+- Install the header for `virtio-loopback-driver`.  
 
-  Download the `virtio-lo-dev_X.X.deb` development ubuntu package from the latest
-  release builds from its github repository:
-
-  [https://github.com/unified-hmi/remote-virtio-gpu-driver/releases/latest](https://github.com/unified-hmi/remote-virtio-gpu-driver/releases/latest)
-
-  And install it:
+  Download the `virtio-lo-dev_X.X.X.deb` development ubuntu package from the latest release builds from its github repository and install it.  
+  Specify the correct version of `X.X.X` by referring to https://github.com/unified-hmi/virtio-loopback-driver/releases/latest  
+  For example: `virtio-lo-dev_1.0.0.deb`.  
 
   ```
-  sudo dpkg -i virtio-lo-dev_0.1.deb
+  wget https://github.com/unified-hmi/virtio-loopback-driver/releases/latest/download/virtio-lo-dev_X.X.X.deb
+  sudo dpkg -i virtio-lo-dev_X.X.X.deb
   ```
-
+  
   Alternatively you can just copy the header to `/usr/include/linux`:
 
   ```
-  wget https://github.com/unified-hmi/remote-virtio-gpu-driver/blob/main/virtio_lo_device.h
-  sudo cp virtio_lo_device.h /usr/include/linux
+  wget https://github.com/unified-hmi/virtio-loopback-driver/raw/main/virtio_lo.h
+  sudo cp virtio_lo.h /usr/include/linux
   ```
 
 - Build and install remote-virtio-gpu
 
     ```
+    git clone https://github.com/unified-hmi/remote-virtio-gpu.git
+    cd ./remote-virtio-gpu
     cmake -B build -DCMAKE_BUILD_TYPE=Release
     make -C build
     sudo make install -C build
     ```
 
-## Installation instructions
+## Binary-only Install
+  Download the `remote-virtio-gpu_X.X.X.deb` ubuntu package from the latest
+  release builds from this github repository and install it.  
+  Specify the correct version of `X.X.X` by referring to https://github.com/unified-hmi/remote-virtio-gpu/releases/latest  
+  For example: `remote-virtio-gpu_1.0.0.deb`.  
 
-  To use `remote-virtio-gpu`, you should be able to load the kernel, so turn **Secure Boot** off.
-
-- Install `virtio-lo` kernel module
-
-  Download the `virtio-lo-dkms_X.X_amd64.deb`
-  [DKMS](https://en.wikipedia.org/wiki/Dynamic_Kernel_Module_Support)
-  ubuntu package from the latest
-  release builds from its github repository:
-
-  [https://github.com/unified-hmi/remote-virtio-gpu-driver/releases/latest](https://github.com/unified-hmi/remote-virtio-gpu-driver/releases/latest)
-
-  Then install it:
+  **Note:** An error about unresolved dependencies will occur when executing the following 2nd command, `sudo dpkg -i remote-virtio-gpu_X.X.X.deb`. This error can be resolved by running the 3rd one, `sudo apt -f install`.
 
   ```
-  sudo dpkg -i virtio-lo-dkms_0.1_amd64.deb
+  wget https://github.com/unified-hmi/remote-virtio-gpu/releases/latest/download/remote-virtio-gpu_X.X.X.deb
+  sudo dpkg -i remote-virtio-gpu_X.X.X.deb
   sudo apt -f install
   ```
+# How to Install Virtio-loopback-driver
+When using RVGPU, this module is also necessary.  
+For instructions on how to install Virtio-loopback-driver, please refer to the [README](https://github.com/unified-hmi/virtio-loopback-driver).
 
-  Here the first command will give an error complaining about unresolved dependencies,
-  which you fix with the second one.
+# How to Install Weston
 
-  Alternatively you can just follow the build instructions from its repo's README.
+The operation of RVGPU can be tested using Weston version 8.0.93 or above.  
+Install Weston-8.0.93
+```
+sudo apt install libjpeg-dev libwebp-dev libsystemd-dev libpam-dev libva-dev freerdp2-dev \
+               libxcb-composite0-dev liblcms2-dev libcolord-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.2-dev \
+               libxml2-dev meson libxkbcommon-x11-dev libpixman-1-dev libinput-dev libdrm-dev wayland-protocols libcairo2-dev \
+               libpango1.0-dev libdbus-1-dev libgbm-dev libxcursor-dev
 
-  After installation of `virtio-lo` kernel module, load the required modules into kernel:
+wget https://wayland.freedesktop.org/releases/weston-8.0.93.tar.xz
+tar -xf weston-8.0.93.tar.xz
+cd ~/weston-8.0.93/
+meson build/
+sudo ninja -C build/ install
+sudo ldconfig
+``` 
 
-  ```
-  sudo modprobe virtio-lo
-  sudo modprobe virtio-gpu
-  ```
-
-- Install `remote-virtio-gpu` software
-
-  Download the `remote-virtio-gpu_X.X.deb` ubuntu package from the latest
-  release builds from this github repository:
-
-  [https://github.com/unified-hmi/remote-virtio-gpu/releases/latest](https://github.com/unified-hmi/remote-virtio-gpu/releases/latest)
-
-  Then install it:
-
-  ```
-  sudo dpkg -i remote-virtio-gpu_0.1.deb
-  sudo apt -f install
-  ```
-
-  Again, the first command will give an error complaining about unresolved dependencies,
-  which you fix with the second one.
-
-  Alternatively you can just follow the build instructions from the section
-  [Build instructions](#build-instructions).
-
-## Run RVGPU
+# Run RVGPU
 
 RVGPU software consists of client (`rvgpu-proxy`) and server (`rvgpu-renderer`).
 Let's describe how to run them on the same machine via the localhost interface.
-We will start with `rvgpu-renderer`.
+We will start with `rvgpu-renderer`.  
+To use RVGPU, you should be able to load the kernel, so turn **Secure Boot** off.
 
-### Run `rvgpu-renderer` on Wayland
+
+## Run `rvgpu-renderer` on Wayland
 
 `rvgpu-renderer` with Wayland backend creates a window in the Wayland environment
 and renders into it.  So you should have a window system supporting Wayland protocol
 (such as Gnome with Wayland protocol or Weston) running.
-To be sure your window system uses Wayland protocol,
-choose [Wayland](https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-20-04-desktop)
-on login screen.
+To make this work, you can choose from [Using Ubuntu on Wayland](#using-ubuntu-on-wayland) or [Using Ubuntu (default)](#using-ubuntu-default).
 
+
+### Using Ubuntu on Wayland
+Select [Ubuntu on Wayland](https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-20-04-desktop) at the login screen.
 Open a terminal and run this command:
 
 ```
 rvgpu-renderer -b 1280x720@0,0 -p 55667
 ```
+After this command, launching rvgpu-proxy will make the rvgpu-renderer create a window.
 
-Alternatively, you can launch a dedicated instance of Weston and run `rvgpu-renderer`
-inside it.  To do that install `weston`:
-
-```
-sudo apt install weston
-```
-
-and run this script:
+### Using Ubuntu (default)
+You can launch a dedicated instance of Weston and run `rvgpu-renderer`
+inside it.
 
 ```
-export XDG_RUNTIME_DIR=/tmp
-weston --width 2200 --height 1200 -S wayland-uhmi &
-export WAYLAND_DISPLAY=wayland-uhmi
+weston --width 2200 --height 1200 &
 rvgpu-renderer -b 1280x720@0,0 -p 55667
 ```
 
-This will create a weston window where `rvgpu-renderer` will create its own
-nested subwindow after `rvgpu-proxy` is run.
+This command will create a weston window. Launching rvgpu-proxy will make the rvgpu-renderer create nested subwindow.
 The script does not require the window system uses Wayland protocol,
 so it could be run under X Window system.
 
-### Run `rvgpu-proxy`
+## Run `rvgpu-proxy`
 
 `rvgpu-proxy` should be able to access the kernel modules `virtio-lo` and `virtio-gpu`
-so it should be run with supersuer privelegies.
+so it should be run with superuser privileges.
 
 ```
 sudo -i
 modprobe virtio-gpu
 modprobe virtio-lo
-
 rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667
 ```
+**Note:** Those who have performed "Building from source" please follow the instructions below.
+```
+rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667 -c /usr/local/etc/virgl.capset
+```
 
-After you run this, another GPU node `/dev/dri/card1` should appear.
-Also, if you are running `rvgpu-renderer` in Wayland mode, it should create 
+After you run this, another GPU node `/dev/dri/cardX` appear.
+Also, if you are running `rvgpu-renderer` in Wayland mode, it create 
 a new window.
 
-You can test the new gpu node for example running Weston on it:
-
+You can test the new gpu node for example running Weston-8.0.93 on it: 
 ```
 export XDG_RUNTIME_DIR=/tmp
 weston --backend drm-backend.so --tty=2 --seat=seat_virtual -i 0
 ```
 
-After that `rvgpu-renderer` will display _weston_ rendered and transferred
+After that `rvgpu-renderer` will display weston rendered and transferred
 via localhost by `rvgpu-proxy`. Now you can launch `glmark2-es2-wayland` or
 some other graphical application to verify that everything works.
+```
+sudo apt install glmark2-es2-wayland
+glmark2-es2-wayland
+```
 
 ## VSYNC feature
 
