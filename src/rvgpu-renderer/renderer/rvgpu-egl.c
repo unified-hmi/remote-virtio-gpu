@@ -31,6 +31,133 @@ struct rect {
 	int height;
 };
 
+void rvgpu_init_glsyncobjs_state(
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state, void *current_ctx)
+{
+	glsyncobjs_state->current_ctx = current_ctx;
+	glsyncobjs_state->cnt = 0;
+	glsyncobjs_state->size = 1;
+	glsyncobjs_state->glsyncobjs =
+		(GLsync *)calloc(glsyncobjs_state->size, sizeof(GLsync));
+	assert(glsyncobjs_state->glsyncobjs);
+	glsyncobjs_state->ctxs =
+		(void **)calloc(glsyncobjs_state->size, sizeof(void *));
+	assert(glsyncobjs_state->ctxs);
+}
+
+void rvgpu_increment_glsyncobjs_size(
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state)
+{
+	glsyncobjs_state->size++;
+	GLsync *glsyncobjs =
+		(GLsync *)realloc(glsyncobjs_state->glsyncobjs,
+				  glsyncobjs_state->size * sizeof(GLsync));
+	assert(glsyncobjs);
+
+	if (glsyncobjs != NULL) {
+		glsyncobjs_state->glsyncobjs = glsyncobjs;
+	}
+
+	void **ctxs = (void **)realloc(glsyncobjs_state->ctxs,
+				       glsyncobjs_state->size * sizeof(void *));
+	assert(ctxs);
+	if (ctxs != NULL) {
+		glsyncobjs_state->ctxs = ctxs;
+	}
+}
+
+void rvgpu_decrement_glsyncobjs_size(
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state, void *ctx)
+{
+	assert(glsyncobjs_state->size > 0);
+	glsyncobjs_state->size--;
+
+	GLsync *tmp_glsyncobjs =
+		(GLsync *)calloc(glsyncobjs_state->size, sizeof(GLsync));
+	assert(tmp_glsyncobjs);
+	void **tmp_ctxs =
+		(void **)calloc(glsyncobjs_state->size, sizeof(void *));
+	assert(tmp_ctxs);
+
+	int j = 0;
+	for (size_t i = 0; i < glsyncobjs_state->cnt; ++i) {
+		if (glsyncobjs_state->ctxs[i] == ctx) {
+			glDeleteSync(glsyncobjs_state->glsyncobjs[i]);
+		} else {
+			tmp_glsyncobjs[j] = glsyncobjs_state->glsyncobjs[i];
+			tmp_ctxs[j] = glsyncobjs_state->ctxs[i];
+			j++;
+		}
+	}
+
+	for (size_t i = 0; i < glsyncobjs_state->size; ++i) {
+		glsyncobjs_state->glsyncobjs[i] = tmp_glsyncobjs[i];
+		glsyncobjs_state->ctxs[i] = tmp_ctxs[i];
+	}
+	free(tmp_glsyncobjs);
+	free(tmp_ctxs);
+
+	GLsync *glsyncobjs =
+		(GLsync *)realloc(glsyncobjs_state->glsyncobjs,
+				  glsyncobjs_state->size * sizeof(GLsync));
+	assert(glsyncobjs);
+	if (glsyncobjs != NULL) {
+		glsyncobjs_state->glsyncobjs = glsyncobjs;
+	}
+
+	void **ctxs = (void **)realloc(glsyncobjs_state->ctxs,
+				       glsyncobjs_state->size * sizeof(void *));
+	assert(ctxs);
+	if (ctxs != NULL) {
+		glsyncobjs_state->ctxs = ctxs;
+	}
+}
+
+void rvgpu_set_glsyncobj(struct rvgpu_glsyncobjs_state *glsyncobjs_state)
+{
+	GLsync glsyncobj = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	for (size_t i = 0; i < glsyncobjs_state->cnt; ++i) {
+		if (glsyncobjs_state->ctxs[i] ==
+		    glsyncobjs_state->current_ctx) {
+			GLsync old_glsyncobj = glsyncobjs_state->glsyncobjs[i];
+			glDeleteSync(old_glsyncobj);
+			glsyncobjs_state->glsyncobjs[i] = glsyncobj;
+			return;
+		}
+	}
+
+	glsyncobjs_state->glsyncobjs[glsyncobjs_state->cnt] = glsyncobj;
+	glsyncobjs_state->ctxs[glsyncobjs_state->cnt] =
+		glsyncobjs_state->current_ctx;
+	glsyncobjs_state->cnt++;
+}
+
+void rvgpu_set_wait_glsyncobjs(struct rvgpu_glsyncobjs_state *glsyncobjs_state)
+{
+	for (size_t i = 0; i < glsyncobjs_state->cnt; ++i) {
+		if (glsyncobjs_state->glsyncobjs[i] &&
+		    glsyncobjs_state->ctxs[i]) {
+			glWaitSync(glsyncobjs_state->glsyncobjs[i], 0,
+				   GL_TIMEOUT_IGNORED);
+			glDeleteSync(glsyncobjs_state->glsyncobjs[i]);
+			glsyncobjs_state->glsyncobjs[i] = NULL;
+			glsyncobjs_state->ctxs[i] = NULL;
+		}
+	}
+	glsyncobjs_state->cnt = 0;
+}
+
+void rvgpu_glsyncobjs_state_free(struct rvgpu_glsyncobjs_state *glsyncobjs_state)
+{
+	free(glsyncobjs_state->glsyncobjs);
+	glsyncobjs_state->glsyncobjs = NULL;
+
+	free(glsyncobjs_state->ctxs);
+	glsyncobjs_state->ctxs = NULL;
+
+	free(glsyncobjs_state);
+}
+
 void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 {
 	EGLint config_attribs[] = { EGL_SURFACE_TYPE,
@@ -94,11 +221,17 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 	assert(e->context);
 
 	LIST_INIT(&e->vscanouts);
+
+	e->glsyncobjs_state = (struct rvgpu_glsyncobjs_state *)calloc(
+		1, sizeof(struct rvgpu_glsyncobjs_state));
+	assert(e->glsyncobjs_state);
+	rvgpu_init_glsyncobjs_state(e->glsyncobjs_state, e->context);
 }
 
 void *rvgpu_egl_create_context(struct rvgpu_egl_state *e, int major, int minor,
 			       int shared)
 {
+	rvgpu_increment_glsyncobjs_size(e->glsyncobjs_state);
 	EGLint ctxattr[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, major,
 			     EGL_CONTEXT_MINOR_VERSION_KHR, minor, EGL_NONE };
 	return eglCreateContext(e->dpy, e->config,
@@ -108,13 +241,16 @@ void *rvgpu_egl_create_context(struct rvgpu_egl_state *e, int major, int minor,
 
 void rvgpu_egl_destroy_context(struct rvgpu_egl_state *e, void *ctx)
 {
+	rvgpu_decrement_glsyncobjs_size(e->glsyncobjs_state, ctx);
 	eglMakeCurrent(e->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	eglDestroyContext(e->dpy, ctx);
 }
 
 int rvgpu_egl_make_context_current(struct rvgpu_egl_state *e, void *ctx)
 {
+	rvgpu_set_glsyncobj(e->glsyncobjs_state);
 	eglMakeCurrent(e->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
+	e->glsyncobjs_state->current_ctx = ctx;
 	return 0;
 }
 
@@ -158,6 +294,8 @@ void rvgpu_egl_free(struct rvgpu_egl_state *e)
 	eglTerminate(e->dpy);
 	if (e->cb->free)
 		e->cb->free(e);
+
+	rvgpu_glsyncobjs_state_free(e->glsyncobjs_state);
 }
 
 void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
@@ -169,7 +307,10 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 	if (!s->native)
 		return;
 
+	rvgpu_set_glsyncobj(e->glsyncobjs_state);
 	eglMakeCurrent(e->dpy, s->surface, s->surface, e->context);
+	e->glsyncobjs_state->current_ctx = e->context;
+	rvgpu_set_wait_glsyncobjs(e->glsyncobjs_state);
 
 	eglSwapInterval(e->dpy, vsync ? 1 : 0);
 	glViewport(0, 0, (int)s->window.w, (int)s->window.h);

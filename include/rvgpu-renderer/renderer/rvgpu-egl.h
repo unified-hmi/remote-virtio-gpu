@@ -19,6 +19,7 @@
 #define RVGPU_EGL_H
 
 #include <EGL/egl.h>
+#include <GLES3/gl3.h>
 #include <linux/virtio_gpu.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -98,6 +99,17 @@ struct rvgpu_egl_callbacks {
 	void (*move_cursor)(struct rvgpu_egl_state *e, uint32_t x, uint32_t y);
 };
 
+/**
+ * @brief glFenceSync object list before eglSwapBuffers
+ */
+struct rvgpu_glsyncobjs_state {
+	void *current_ctx;
+	GLsync *glsyncobjs;
+	size_t cnt;
+	size_t size;
+	void **ctxs;
+};
+
 struct rvgpu_egl_state {
 	/* regular scanouts */
 	struct rvgpu_scanout scanouts[VIRTIO_GPU_MAX_SCANOUTS];
@@ -119,6 +131,9 @@ struct rvgpu_egl_state {
 	/* backend requires specific native buffer format */
 	bool use_native_format;
 	uint32_t native_format;
+
+	/* support GPU commands synchronization between rvgpu and virglrenderer */
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state;
 };
 
 /** Initialize main context */
