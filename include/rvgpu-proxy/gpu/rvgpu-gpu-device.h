@@ -31,6 +31,8 @@
 #define PIPE_READ (0)
 #define PIPE_WRITE (1)
 
+#define PCI_VENDOR_ID_REDHAT_QUMRANET 0x1af4
+
 struct gpu_device;
 
 struct gpu_device_params {
