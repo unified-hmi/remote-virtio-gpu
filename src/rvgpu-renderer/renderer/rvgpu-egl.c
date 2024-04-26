@@ -168,6 +168,8 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 				    8,
 				    EGL_BLUE_SIZE,
 				    8,
+				    EGL_ALPHA_SIZE,
+				    8,
 				    EGL_CONFORMANT,
 				    EGL_OPENGL_ES2_BIT,
 				    EGL_RENDERABLE_TYPE,
