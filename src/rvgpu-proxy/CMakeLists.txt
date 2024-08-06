@@ -31,5 +31,5 @@ target_compile_definitions(rvgpu-proxy PRIVATE
 	_DEFAULT_SOURCE
 	_GNU_SOURCE
 	LIBRVGPU_SOVERSION=${LIBRVGPU_SOVERSION})
-target_link_libraries(rvgpu-proxy PRIVATE pthread dl)
+target_link_libraries(rvgpu-proxy PRIVATE pthread dl udev)
 install(TARGETS rvgpu-proxy RUNTIME DESTINATION bin)

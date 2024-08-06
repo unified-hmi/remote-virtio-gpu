@@ -52,6 +52,8 @@
 #include <rvgpu-generic/rvgpu-capset.h>
 #include <rvgpu-generic/rvgpu-sanity.h>
 
+#include <libudev.h>
+
 #define GPU_MAX_CAPDATA 16
 
 #if !defined(VIRTIO_GPU_RESP_ERR_DEVICE_RESET)
@@ -621,6 +623,51 @@ static void *resource_thread_func(void *param)
 	return NULL;
 }
 
+int find_virtual_drm_card_devices()
+{
+	int card_num = 0;
+	struct udev *udev = udev_new();
+	if (udev == NULL) {
+		fprintf(stderr, "%s(%d)\n", __FILE__, __LINE__);
+		return card_num;
+	}
+
+	struct udev_enumerate *enumerate = udev_enumerate_new(udev);
+	if (!enumerate) {
+		fprintf(stderr,
+			"Failed to create enumerate context at %s(%d)\n",
+			__FILE__, __LINE__);
+		udev_unref(udev);
+		return card_num;
+	}
+
+	udev_enumerate_add_match_subsystem(enumerate, "drm");
+	udev_enumerate_scan_devices(enumerate);
+
+	struct udev_list_entry *devices =
+		udev_enumerate_get_list_entry(enumerate);
+	struct udev_list_entry *entry = NULL;
+	udev_list_entry_foreach(entry, devices)
+	{
+		const char *path = udev_list_entry_get_name(entry);
+		struct udev_device *dev =
+			udev_device_new_from_syspath(udev, path);
+		if (dev) {
+			const char *seat =
+				udev_device_get_property_value(dev, "ID_SEAT");
+			const char *devnode = udev_device_get_devnode(dev);
+			if (seat && strcmp(seat, "seat_virtual") == 0 &&
+			    devnode && strstr(devnode, "card") != NULL) {
+				card_num++;
+			}
+			udev_device_unref(dev);
+		}
+	}
+	udev_enumerate_unref(enumerate);
+	udev_unref(udev);
+	return card_num;
+}
+
 struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 				   const struct gpu_device_params *params,
 				   struct rvgpu_backend *b)
@@ -629,11 +676,12 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 	struct virtio_lo_qinfo q[2];
 	unsigned int i;
 
+	int virtual_card_num = find_virtual_drm_card_devices();
 	struct virtio_lo_devinfo info = {
 		.nqueues = 2u,
 		.qinfo = q,
 		.device_id = VIRTIO_ID_GPU,
-		.vendor_id = 0x1af4, /* PCI_VENDOR_ID_REDHAT_QUMRANET */
+		.vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET + virtual_card_num,
 		.config_size = sizeof(struct virtio_gpu_config),
 		.features =
 			bit64(VIRTIO_GPU_F_VIRGL) | bit64(VIRTIO_F_VERSION_1),
