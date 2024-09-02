@@ -1,1 +1,1 @@
-SUBSYSTEM=="input", ATTRS{name}=="rvgpu*", DEVPATH=="/devices/virtual/input/*", TAG+="seat", ENV{ID_SEAT}="seat_virtual", SYMLINK="input/%s{name}"
+SUBSYSTEM=="input", ATTRS{name}=="rvgpu*", DEVPATH=="/devices/virtual/input/*", TAG+="seat", ENV{ID_SEAT}="seat_virtual", PROGRAM="/bin/bash -c '[ -f /tmp/rvgpu-index ] && cat /tmp/rvgpu-index || echo \"\"'",  SYMLINK+="input/%s{name}%c"

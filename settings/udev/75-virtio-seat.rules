@@ -1,1 +1,1 @@
-SUBSYSTEM=="drm", DEVPATH=="/devices/virtio-lo-bus/*", TAG+="seat", TAG+="master-of-seat", ENV{ID_SEAT}="seat_virtual"
+SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="/devices/virtio-lo-bus/*", TAG+="seat", TAG+="master-of-seat", ENV{ID_SEAT}="seat_virtual", PROGRAM="/bin/bash -c '[ -f /tmp/rvgpu-index ] && cat /tmp/rvgpu-index || echo \"\"'", SYMLINK+="dri/rvgpu_virtio%c"
