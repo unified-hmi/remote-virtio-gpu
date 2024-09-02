@@ -30,6 +30,11 @@
 #include <librvgpu/rvgpu-protocol.h>
 #include <librvgpu/rvgpu.h>
 
+#define VIRGL_FORMAT_R32G32B32A32_FLOAT 31
+#define VIRGL_FORMAT_R8_UNORM 64
+#define VIRGL_FORMAT_DXT5_RGBA 108
+#define VIRGL_FORMAT_DXT5_SRGBA 112
+
 struct patch_data {
 	struct rvgpu_patch hdr;
 	unsigned int niov;
@@ -124,21 +129,39 @@ int rvgpu_ctx_transfer_to_host(struct rvgpu_ctx *ctx,
 			       const struct rvgpu_res *res)
 {
 	struct rvgpu_patch p = { .len = 0 };
-	const unsigned int bpp = 4;
+	unsigned int bpp = 4;
 	uint32_t stride;
 
 	if (res->info.target == 0) {
 		gpu_device_send_data(ctx, res->backing, res->nbacking,
 				     t->offset, t->w);
 	} else if (res->info.target == 2) {
+		if (res->info.format == VIRGL_FORMAT_R8_UNORM) {
+			bpp = 1;
+		} else if (res->info.format ==
+			   VIRGL_FORMAT_R32G32B32A32_FLOAT) {
+			bpp = 16;
+		} else if (res->info.format == VIRGL_FORMAT_DXT5_SRGBA) {
+			bpp = 1;
+		} else if (res->info.format == VIRGL_FORMAT_DXT5_RGBA) {
+			bpp = 1;
+		}
+
 		stride = t->stride;
 		if (stride == 0)
 			stride = bpp * res->info.width;
 
-		for (size_t h = 0u; h < t->h; h++) {
+		if (res->info.format == VIRGL_FORMAT_DXT5_SRGBA ||
+		    res->info.format == VIRGL_FORMAT_DXT5_RGBA) {
 			gpu_device_send_data(ctx, res->backing, res->nbacking,
-					     t->offset + h * stride,
-					     t->w * bpp);
+					     t->offset, t->w * t->h * bpp);
+		} else {
+			for (size_t h = 0u; h < t->h; h++) {
+				gpu_device_send_data(ctx, res->backing,
+						     res->nbacking,
+						     t->offset + h * stride,
+						     t->w * bpp);
+			}
 		}
 	} else {
 		gpu_device_send_data(ctx, res->backing, res->nbacking,
