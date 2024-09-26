@@ -47,7 +47,6 @@ static void usage(void)
 	info("\t-s scanout\tspecify scanout in form WxH@X,Y (default: %ux%u@0,0)\n",
 	     DEFAULT_WIDTH, DEFAULT_HEIGHT);
 	info("\t-f rate\t\tspecify virtual framerate (default: disabled)\n");
-	info("\t-i index\tspecify index 'n' for device /dev/dri/card<n>\n");
 	info("\t-n\t\tserver:port for connecting (max 4 hosts, default: %s:%s)\n",
 	     RVGPU_DEFAULT_HOSTNAME, RVGPU_DEFAULT_PORT);
 	info("\t-h\t\tshow this message\n");
@@ -79,7 +78,6 @@ int main(int argc, char **argv)
 	struct gpu_device_params params = {
 		.framerate = 0u,
 		.mem_limit = VMEM_DEFAULT_MB,
-		.card_index = -1,
 		.num_scanouts = 0u,
 		.dpys = { { .r = { .x = 0,
 				   .y = 0,
@@ -97,37 +95,16 @@ int main(int argc, char **argv)
 	};
 
 	pthread_t input_thread;
-	char path[64];
 	FILE *oomFile;
-	int lo_fd, epoll_fd, res, opt, capset = -1;
+	int lo_fd, epoll_fd, opt, capset = -1;
 	char *ip, *port, *errstr = NULL;
 
-	while ((opt = getopt(argc, argv, "hi:n:M:c:R:f:s:")) != -1) {
+	while ((opt = getopt(argc, argv, "hn:M:c:R:f:s:")) != -1) {
 		switch (opt) {
 		case 'c':
 			capset = open(optarg, O_RDONLY);
 			if (capset == -1)
 				err(1, "open %s", optarg);
-			break;
-		case 'i':
-			params.card_index =
-				(int)sanity_strtonum(optarg, CARD_INDEX_MIN,
-						     CARD_INDEX_MAX - 1,
-						     &errstr);
-			if (errstr != NULL) {
-				warnx("Card index should be in [%u..%u]\n",
-				      CARD_INDEX_MIN, CARD_INDEX_MAX - 1);
-				errx(1, "Invalid card index %s:%s", optarg,
-				     errstr);
-			}
-
-			snprintf(path, sizeof(path), "/dev/dri/card%d",
-				 params.card_index);
-			res = access(path, F_OK);
-			if (res == 0)
-				errx(1, "device %s exists", path);
-			else if (errno != ENOENT)
-				err(1, "error while checking device %s", path);
 			break;
 		case 'M':
 			params.mem_limit = (unsigned int)sanity_strtonum(
