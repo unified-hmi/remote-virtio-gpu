@@ -37,7 +37,6 @@ struct gpu_device;
 
 struct gpu_device_params {
 	bool split_resources;
-	int card_index;
 	unsigned int num_scanouts;
 	unsigned int mem_limit;
 	unsigned long framerate;

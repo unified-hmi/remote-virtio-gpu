@@ -703,7 +703,6 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 	if (capset != -1)
 		gpu_capset_init(g, capset);
 
-	info.card_index = params->card_index;
 	info.config = (__u8 *)&g->config;
 	info.config_kick = g->config_fd;
 
@@ -1061,8 +1060,6 @@ static void gpu_device_trigger_vsync(struct gpu_device *g,
 		return;
 
 	hdr->flags |= VIRTIO_GPU_FLAG_VSYNC;
-	/* use padding bytes to pass scanout_id to virtio-gpu driver */
-	hdr->padding = g->scan_id;
 	add_resp(g, hdr, req);
 
 	if ((!vsync_ts.tv_sec) && (!vsync_ts.tv_nsec)) {
