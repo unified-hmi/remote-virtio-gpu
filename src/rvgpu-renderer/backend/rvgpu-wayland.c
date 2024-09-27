@@ -264,6 +264,13 @@ static void pointer_handle_enter(void *data, struct wl_pointer *pointer,
 	(void)surface;
 	r->pointer_pos_x = wl_fixed_to_int(sx);
 	r->pointer_pos_y = wl_fixed_to_int(sy);
+
+	struct rvgpu_input_event evs[] = {
+		{ EV_ABS, ABS_X, r->pointer_pos_x },
+		{ EV_ABS, ABS_Y, r->pointer_pos_y },
+	};
+	rvgpu_in_events(r->in, RVGPU_INPUT_MOUSE_ABS, evs, 2);
+	rvgpu_in_send(r->in, RVGPU_INPUT_MOUSE_ABS);
 }
 
 static void pointer_handle_leave(void *data, struct wl_pointer *pointer,
