@@ -358,9 +358,12 @@ static void upload_resource(struct rvgpu_pr_state *state,
 {
 	struct iovec *p = NULL;
 	int iovn = 0;
-	struct rvgpu_res_message_header transfer = {.type = RVGPU_RES_TRANSFER};
+	struct rvgpu_res_message_header transfer = {
+		.type = RVGPU_RES_TRANSFER
+	};
 	struct rvgpu_header header = {
-	    .size = sizeof(struct virtio_gpu_transfer_host_3d)};
+		.size = sizeof(struct virtio_gpu_transfer_host_3d)
+	};
 	struct rvgpu_patch patch;
 
 	virgl_renderer_resource_detach_iov(t->resource_id, &p, &iovn);
@@ -439,15 +442,16 @@ static void dump_capset(struct rvgpu_pr_state *p)
 	 * VIRTIO_GPU_CAPSET_VIRGL2 (== 2)
 	 * to be ready to move to the next version.
 	 */
-	uint32_t ids[] = {VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2};
+	uint32_t ids[] = { VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2 };
 	long unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(ids) ; i++) {
+	for (i = 0; i < ARRAY_SIZE(ids); i++) {
 		uint32_t maxver, maxsize;
 
 		virgl_renderer_get_cap_set(ids[i], &maxver, &maxsize);
 		if (maxsize == 0 || maxsize >= CAPSET_MAX_SIZE) {
-			warnx("Error while getting capset %u (maxsize=%u)", ids[i], maxsize);
+			warnx("Error while getting capset %u (maxsize=%u)",
+			      ids[i], maxsize);
 			break;
 		}
 
@@ -467,8 +471,8 @@ static void dump_capset(struct rvgpu_pr_state *p)
 			if (fwrite(data, maxsize, 1, p->pp.capset) != 1)
 				warn("Error while dumping capset");
 
-			warnx("capset dumped for id %u version %u size %u", ids[i],
-			      version, maxsize);
+			warnx("capset dumped for id %u version %u size %u",
+			      ids[i], version, maxsize);
 		}
 	}
 	fflush(p->pp.capset);
@@ -496,10 +500,9 @@ static bool check_box(uint32_t resource_id, const struct virtio_gpu_box *b)
 					 info.depth);
 }
 
-static void rvgpu_serve_update_cursor(
-	struct rvgpu_pr_state *p,
-	struct virtio_gpu_update_cursor *c
-) {
+static void rvgpu_serve_update_cursor(struct rvgpu_pr_state *p,
+				      struct virtio_gpu_update_cursor *c)
+{
 	uint32_t w, h;
 	void *data;
 
@@ -515,16 +518,14 @@ static void rvgpu_serve_update_cursor(
 	free(data);
 }
 
-static void rvgpu_serve_move_cursor(
-	struct rvgpu_pr_state *p,
-	struct virtio_gpu_update_cursor *c)
+static void rvgpu_serve_move_cursor(struct rvgpu_pr_state *p,
+				    struct virtio_gpu_update_cursor *c)
 {
 	if (!p->egl->cb->move_cursor)
 		return;
 
 	p->egl->cb->move_cursor(p->egl, c->pos.x, c->pos.y);
 }
-
 
 unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 {
@@ -534,6 +535,10 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 	if (p->pp.capset)
 		dump_capset(p);
 
+	double virgl_cmd_laptime = 0;
+	if (p->egl->fps_params.show_fps) {
+		p->egl->fps_params.rvgpu_laptime_ms = current_get_time_ms();
+	}
 	while (rvgpu_pr_read(p, &uhdr, sizeof(uhdr), 1, COMMAND) == 1) {
 		struct iovec *piov;
 		size_t ret;
@@ -548,6 +553,9 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 		ret = rvgpu_pr_read(p, &r, 1, uhdr.size, COMMAND);
 		if (ret != uhdr.size)
 			errx(1, "Too short read(%zu < %u)", ret, uhdr.size);
+
+		if (p->egl->fps_params.show_fps)
+			virgl_cmd_laptime = current_get_time_ms();
 
 		if (uhdr.flags & RVGPU_CURSOR)
 			sane = sanity_check_gpu_cursor(&r, uhdr.size, false);
@@ -723,6 +731,10 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 				virgl_renderer_poll();
 			}
 		}
+
+		if (p->egl->fps_params.show_fps)
+			p->egl->fps_params.virgl_cmd_time_ms +=
+				current_get_time_ms() - virgl_cmd_laptime;
 
 		if (draw)
 			return draw;

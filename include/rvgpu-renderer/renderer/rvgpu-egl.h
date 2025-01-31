@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <sys/poll.h>
 #include <sys/queue.h>
+#include <stdio.h>
 
 struct pollfd;
 
@@ -34,6 +35,14 @@ struct pollfd;
  */
 struct rvgpu_egl_params {
 	unsigned int clear_color; /**< Color of empty screen */
+};
+
+struct rvgpu_fps_params {
+	bool show_fps;
+	double rvgpu_laptime_ms;
+	double virgl_cmd_time_ms;
+	int swap_cnt;
+	FILE *fps_dump_fp;
 };
 
 struct rvgpu_box {
@@ -95,7 +104,8 @@ struct rvgpu_egl_callbacks {
 	void (*draw)(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		     bool vsync);
 	void (*free)(struct rvgpu_egl_state *e);
-	void (*set_cursor)(struct rvgpu_egl_state *e, uint32_t w, uint32_t h, void *data);
+	void (*set_cursor)(struct rvgpu_egl_state *e, uint32_t w, uint32_t h,
+			   void *data);
 	void (*move_cursor)(struct rvgpu_egl_state *e, uint32_t x, uint32_t y);
 };
 
@@ -134,6 +144,8 @@ struct rvgpu_egl_state {
 
 	/* support GPU commands synchronization between rvgpu and virglrenderer */
 	struct rvgpu_glsyncobjs_state *glsyncobjs_state;
+
+	struct rvgpu_fps_params fps_params;
 };
 
 /** Initialize main context */
@@ -192,6 +204,8 @@ void rvgpu_destroy_vscanout(struct rvgpu_egl_state *e, struct rvgpu_scanout *s);
 
 /** Destroy all virtual scanouts */
 void rvgpu_destroy_all_vscanouts(struct rvgpu_egl_state *e);
+
+void rvgpu_init_fps_dump(FILE **fps_dump_fp);
 
 /** Container of macro for callback implementation */
 #define rvgpu_container_of(ptr, typ, member)                                   \

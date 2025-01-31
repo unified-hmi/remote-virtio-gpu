@@ -21,8 +21,28 @@
 #include <assert.h>
 #include <err.h>
 #include <stdlib.h>
+#include <stdio.h>
 
+#include <rvgpu-generic/rvgpu-utils.h>
+#include <rvgpu-renderer/rvgpu-renderer.h>
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
+
+void rvgpu_init_fps_dump(FILE **fps_dump_fp)
+{
+	char *fps_dump_path = getenv("RVGPU_FPS_DUMP_PATH");
+	if (fps_dump_path) {
+		*fps_dump_fp = fopen(fps_dump_path, "w");
+		if (*fps_dump_fp != NULL) {
+			fprintf(*fps_dump_fp,
+				"Date FrameTime(ms) VirglTime(ms) FenceTime(ms) SwapTime(ms) Others(ms) FPS\n");
+		} else {
+			err(1, "cannot open fps dump file");
+			fclose(*fps_dump_fp);
+		}
+	} else {
+		info("Environment variable RVGPU_FPS_DUMP_PATH is not set. Please specify a path to dump file\n");
+	}
+}
 
 struct rect {
 	int x;
@@ -203,7 +223,7 @@ void rvgpu_egl_init_context(struct rvgpu_egl_state *e)
 			EGLint attr;
 
 			eglGetConfigAttrib(e->dpy, configs[config_index],
-			                   EGL_NATIVE_VISUAL_ID, &attr);
+					   EGL_NATIVE_VISUAL_ID, &attr);
 			if ((uint32_t)attr == e->native_format)
 				break;
 		}
@@ -287,6 +307,9 @@ void rvgpu_egl_destroy_scanout(struct rvgpu_egl_state *e,
 
 void rvgpu_egl_free(struct rvgpu_egl_state *e)
 {
+	if (e->fps_params.fps_dump_fp != NULL) {
+		close(e->fps_params.fps_dump_fp);
+	}
 	eglMakeCurrent(e->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	eglDestroyContext(e->dpy, e->context);
 	for (unsigned int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++)
@@ -303,6 +326,15 @@ void rvgpu_egl_free(struct rvgpu_egl_state *e)
 void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		    bool vsync)
 {
+	double virgl_fence_laptime = 0, swap_laptime = 0;
+	double rvgpu_interval_ms = 0, virgl_fence_time_ms = 0,
+	       draw_swap_time_ms = 0;
+	if (e->fps_params.show_fps) {
+		rvgpu_interval_ms =
+			current_get_time_ms() - e->fps_params.rvgpu_laptime_ms;
+		virgl_fence_laptime = current_get_time_ms();
+	}
+
 	if (!s->native)
 		rvgpu_egl_create_scanout(e, s);
 
@@ -313,7 +345,11 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 	eglMakeCurrent(e->dpy, s->surface, s->surface, e->context);
 	e->glsyncobjs_state->current_ctx = e->context;
 	rvgpu_set_wait_glsyncobjs(e->glsyncobjs_state);
-
+	if (e->fps_params.show_fps) {
+		virgl_fence_time_ms =
+			current_get_time_ms() - virgl_fence_laptime;
+		swap_laptime = current_get_time_ms();
+	}
 	eglSwapInterval(e->dpy, vsync ? 1 : 0);
 	glViewport(0, 0, (int)s->window.w, (int)s->window.h);
 
@@ -347,11 +383,39 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 				  (int)(vbox->x + vbox->w), (int)y2, 0, 0,
 				  (int)s->window.w, (int)s->window.h,
 				  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		if (e->fps_params.show_fps) {
+			e->fps_params.swap_cnt++;
+		}
 	}
+
 	if (e->cb->draw)
 		e->cb->draw(e, s, vsync);
 	else
 		eglSwapBuffers(e->dpy, s->surface);
+
+	if (e->fps_params.show_fps && s->virgl.tex_id != 0 &&
+	    e->fps_params.swap_cnt > 0) {
+		draw_swap_time_ms = current_get_time_ms() - swap_laptime;
+		if (e->fps_params.fps_dump_fp != NULL) {
+			double frame_time_ms = rvgpu_interval_ms +
+					       virgl_fence_time_ms +
+					       draw_swap_time_ms;
+			double others_ms = frame_time_ms -
+					   e->fps_params.virgl_cmd_time_ms -
+					   virgl_fence_time_ms -
+					   draw_swap_time_ms;
+			struct timeval tv;
+			gettimeofday(&tv, NULL);
+			double fps = 1000 / frame_time_ms;
+			fprintf(e->fps_params.fps_dump_fp,
+				"%ld.%03ld %.3f %.3f %.3f %.3f %.3f %.3f\n",
+				(long)tv.tv_sec, (long)tv.tv_usec / 1000,
+				frame_time_ms, e->fps_params.virgl_cmd_time_ms,
+				virgl_fence_time_ms, draw_swap_time_ms,
+				others_ms, fps);
+			e->fps_params.virgl_cmd_time_ms = 0;
+		}
+	}
 }
 
 void rvgpu_egl_drawall(struct rvgpu_egl_state *e, unsigned int res_id,

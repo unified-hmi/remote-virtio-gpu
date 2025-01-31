@@ -24,6 +24,8 @@
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <librvgpu/rvgpu-protocol.h>
 
+#include <time.h>
+
 #define MIN_PORT_NUMBER 1
 #define MAX_PORT_NUMBER 65535
 
@@ -67,5 +69,12 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 /** Initialize Wayland frontend */
 struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
 				      FILE *events_out);
+
+static inline double current_get_time_ms()
+{
+	struct timespec tv;
+	clock_gettime(CLOCK_MONOTONIC, &tv);
+	return (tv.tv_sec * 1000 + (float)tv.tv_nsec / 1000000.0);
+}
 
 #endif /* RVGPU_RENDERER_H */

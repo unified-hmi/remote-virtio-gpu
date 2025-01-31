@@ -54,6 +54,7 @@ static void usage(void)
 	info("\t-p port\t\tport for listening (default: %u)\n",
 	     RVGPU_DEFAULT_PORT);
 	info("\t-v\t\tRun in vsync mode (eglSwapInterval 1)\n");
+	info("\t-F\t\tEnable measurement of FPS and frame time\n");
 	info("\t-h\t\tShow this message\n");
 
 	info("\nNote:\n");
@@ -70,8 +71,8 @@ static void usage(void)
 	info("\tThis initial surface will be expanded to the full size of application's draw area later.\n");
 
 	info("\n\t'g' option is for using GBM mode, which scales to full screen according to 'b' option.\n");
-
 	info("\n\t'f' option scales to full screen according to 'b' option.\n");
+	info("\n\t'F' option dumps FPS to file set by RVGPU_FPS_DUMP_PATH; no output if unset.\n");
 }
 
 /* Signal handler to reap zombie processes */
@@ -176,7 +177,7 @@ int main(int argc, char **argv)
 		.sp = sp,
 		.nsp = VIRTIO_GPU_MAX_SCANOUTS,
 	};
-	struct rvgpu_egl_params e_params = {
+	struct rvgpu_egl_params egl_params = {
 		.clear_color = BACKEND_COLOR,
 	};
 	char *errstr = NULL;
@@ -189,21 +190,24 @@ int main(int argc, char **argv)
 	bool fullscreen = false, vsync = false, translucent = false,
 	     user_specified_scanouts = false;
 
+	struct rvgpu_fps_params fps_params = { 0 };
+
 	memset(sp, 0, sizeof(sp));
 	memset(&pp, 0, sizeof(pp));
 
-	while ((opt = getopt(argc, argv, "afhvi:c:s:S:b:B:p:g:")) != -1) {
+	while ((opt = getopt(argc, argv, "afhvFi:c:s:S:b:B:p:g:")) != -1) {
 		switch (opt) {
 		case 'a':
 			translucent = true;
 			break;
 		case 'B':
-			e_params.clear_color = (unsigned int)sanity_strtonum(
-						optarg, 0, 0xFFFFFFFF, &errstr);
-			if (errstr != NULL){
+			egl_params.clear_color = (unsigned int)sanity_strtonum(
+				optarg, 0, 0xFFFFFFFF, &errstr);
+			if (errstr != NULL) {
 				warnx("Background color should be in 0 - 0xFFFFFFFF\n");
-				errx(1, "Invalid background color specified %s:%s",
-				     optarg, errstr);				
+				errx(1,
+				     "Invalid background color specified %s:%s",
+				     optarg, errstr);
 			}
 			break;
 
@@ -227,25 +231,28 @@ int main(int argc, char **argv)
 			user_specified_scanouts = true;
 			break;
 		case 'b':
-			if (sscanf(optarg, "%dx%d@%d,%d", &w, &h, &x, &y) != 4) {
+			if (sscanf(optarg, "%dx%d@%d,%d", &w, &h, &x, &y) !=
+			    4) {
 				errx(1, "invalid scanout box %s", optarg);
 			} else {
-				if (w > 0 && h > 0 && x >= 0 && y >= 0){
+				if (w > 0 && h > 0 && x >= 0 && y >= 0) {
 					cp->box.w = (unsigned int)w;
 					cp->box.h = (unsigned int)h;
 					cp->box.x = (unsigned int)x;
 					cp->box.y = (unsigned int)y;
 				} else {
-					errx(1, "invalid scanout configuration %s, width and height "
-						"values must be greater than zero, x y position must be "
-						"greater or equal zero", optarg);
+					errx(1,
+					     "invalid scanout configuration %s, width and height "
+					     "values must be greater than zero, x y position must be "
+					     "greater or equal zero",
+					     optarg);
 				}
 			}
 			cp->boxed = true;
 			break;
 		case 'i':
-			cp->id = (uint32_t)sanity_strtonum(
-				optarg, 1, UINT32_MAX, &errstr);
+			cp->id = (uint32_t)sanity_strtonum(optarg, 1,
+							   UINT32_MAX, &errstr);
 			if (errstr != NULL)
 				errx(1, "Invalid IVI id specified %s:%s",
 				     optarg, errstr);
@@ -261,9 +268,9 @@ int main(int argc, char **argv)
 			break;
 		case 'p':
 			port_nr = (uint16_t)sanity_strtonum(optarg,
-							     MIN_PORT_NUMBER,
-							     MAX_PORT_NUMBER,
-							     &errstr);
+							    MIN_PORT_NUMBER,
+							    MAX_PORT_NUMBER,
+							    &errstr);
 			if (errstr != NULL) {
 				warnx("Port number should be in [%u..%u]\n",
 				      MIN_PORT_NUMBER, MAX_PORT_NUMBER);
@@ -273,6 +280,9 @@ int main(int argc, char **argv)
 			break;
 		case 'v':
 			vsync = true;
+			break;
+		case 'F':
+			fps_params.show_fps = true;
 			break;
 		case 'h':
 			usage();
@@ -295,7 +305,8 @@ int main(int argc, char **argv)
 	else
 		egl = rvgpu_gbm_init(carddev, seat, input_stream);
 
-	egl->params = &e_params;
+	egl->params = &egl_params;
+	egl->fps_params = fps_params;
 
 	pr = rvgpu_pr_init(egl, &pp, res_socket);
 
@@ -310,8 +321,19 @@ int main(int argc, char **argv)
 		}
 	}
 
-	while ((res_id = rvgpu_pr_dispatch(pr))) {
-		rvgpu_egl_drawall(egl, res_id, vsync);
+	if (egl->fps_params.show_fps) {
+		rvgpu_init_fps_dump(&egl->fps_params.fps_dump_fp);
+		while (true) {
+			res_id = rvgpu_pr_dispatch(pr);
+			if (res_id <= 0) {
+				break;
+			}
+			rvgpu_egl_drawall(egl, res_id, vsync);
+		}
+	} else {
+		while ((res_id = rvgpu_pr_dispatch(pr))) {
+			rvgpu_egl_drawall(egl, res_id, vsync);
+		}
 	}
 
 	if (pp.capset)
