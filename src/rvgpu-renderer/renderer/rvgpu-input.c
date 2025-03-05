@@ -108,6 +108,7 @@ void rvgpu_in_add_slot(struct rvgpu_input_state *in, int32_t id,
 		{ EV_ABS, ABS_MISC, (int32_t)window_id },
 		{ EV_ABS, ABS_MT_SLOT, 0 },
 		{ EV_ABS, ABS_MT_TRACKING_ID, (uint16_t)(in->track_seq++) },
+		{ EV_KEY, BTN_TOUCH, 1 },
 	};
 	if (slot != -1)
 		rvgpu_in_remove_slot(in, id);
@@ -122,9 +123,9 @@ void rvgpu_in_add_slot(struct rvgpu_input_state *in, int32_t id,
 	evs[1].value = slot;
 
 	if (in->last_window_id == window_id)
-		rvgpu_in_events(in, RVGPU_INPUT_TOUCH, &evs[1], 2);
+		rvgpu_in_events(in, RVGPU_INPUT_TOUCH, &evs[1], 3);
 	else
-		rvgpu_in_events(in, RVGPU_INPUT_TOUCH, evs, 3);
+		rvgpu_in_events(in, RVGPU_INPUT_TOUCH, evs, 4);
 
 	in->last_slot = slot;
 	in->last_window_id = window_id;
@@ -215,11 +216,12 @@ void rvgpu_in_remove_slot(struct rvgpu_input_state *in, int32_t id)
 		struct rvgpu_input_event evs[] = {
 			{ EV_ABS, ABS_MT_SLOT, slot },
 			{ EV_ABS, ABS_MT_TRACKING_ID, -1 },
+			{ EV_KEY, BTN_TOUCH, 0 },
 		};
 		if (in->last_slot == slot) {
-			rvgpu_in_events(in, RVGPU_INPUT_TOUCH, &evs[1], 1);
+			rvgpu_in_events(in, RVGPU_INPUT_TOUCH, &evs[1], 2);
 		} else {
-			rvgpu_in_events(in, RVGPU_INPUT_TOUCH, evs, 2);
+			rvgpu_in_events(in, RVGPU_INPUT_TOUCH, evs, 3);
 			in->last_slot = slot;
 		}
 		in->slots[slot].id = -1;
