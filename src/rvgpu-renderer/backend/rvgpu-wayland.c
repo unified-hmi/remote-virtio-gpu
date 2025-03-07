@@ -736,16 +736,18 @@ static void rvgpu_wl_create_scanout(struct rvgpu_egl_state *e,
 	assert(n->surface);
 	wl_surface_set_user_data(n->surface, s);
 
-	if (sp->id != 0) {
-		snprintf(title, sizeof(title), "rvgpu scanout %u ID %u",
-			 s->scanout_id, sp->id);
-		snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u.id%u",
-			 s->scanout_id, sp->id);
+	char *app_id = getenv("XDG_TOPLEVEL_FALLBACK_APP_ID");
+	if (app_id) {
+		snprintf(title, sizeof(title), "rvgpu appid %s", app_id);
+		snprintf(id, sizeof(id), "%s", app_id);
 	} else {
-		snprintf(title, sizeof(title), "rvgpu scanout %u",
-			 s->scanout_id);
-		snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u",
-			 s->scanout_id);
+		if (sp->id != 0) {
+			snprintf(title, sizeof(title), "rvgpu scanout %u ID %u", s->scanout_id, sp->id);
+			snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u.id%u", s->scanout_id, sp->id);
+		} else {
+			snprintf(title, sizeof(title), "rvgpu scanout %u", s->scanout_id);
+			snprintf(id, sizeof(id), "com.github.remote-virtio-gpu.renderer.sc%u", s->scanout_id);
+		}
 	}
 
 	if (r->ivi_app) {
