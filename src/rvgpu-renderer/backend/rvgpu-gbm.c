@@ -615,7 +615,20 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 	drmModeFreeResources(res);
 
 	/* GBM->EGL glue */
-	g->egl.dpy = eglGetDisplay(g->gbm_device);
+#ifdef EGL_VERSION_GE_1_5
+	g->egl.dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, g->gbm_device,
+					   NULL);
+#else
+	PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+		(PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
+			"eglGetPlatformDisplayEXT");
+	if (eglGetPlatformDisplayEXT) {
+		g->egl.dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR,
+						      g->gbm_device, NULL);
+	} else {
+		g->egl.dpy = eglGetDisplay(g->gbm_device);
+	}
+#endif
 	assert(g->egl.dpy);
 
 	/* GBM requires to use a specific native format */

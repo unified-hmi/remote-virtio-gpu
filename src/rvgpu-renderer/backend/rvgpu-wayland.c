@@ -872,7 +872,20 @@ struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
 	(void)res;
 
 	/* EGL initialization */
-	r->egl.dpy = eglGetDisplay(r->dpy);
+#ifdef EGL_VERSION_GE_1_5
+	r->egl.dpy =
+		eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_EXT, r->dpy, NULL);
+#else
+	PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+		(PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
+			"eglGetPlatformDisplayEXT");
+	if (eglGetPlatformDisplayEXT) {
+		r->egl.dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_EXT,
+						      r->dpy, NULL);
+	} else {
+		r->egl.dpy = eglGetDisplay(r->dpy);
+	}
+#endif
 	assert(r->egl.dpy);
 
 	/* Wayland does not require to use any specific native format */

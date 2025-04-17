@@ -35,6 +35,14 @@ endif(CMAKE_SYSROOT AND NOT ENV{PKG_CONFIG_LIBDIR})
 include(FindPkgConfig)
 pkg_check_modules(extlibs REQUIRED virglrenderer egl glesv2 wayland-client wayland-egl gbm libdrm libinput)
 
+# Check if EGL version is 1.5 or greater
+if(extlibs_egl_VERSION VERSION_GREATER_EQUAL "1.5")
+    message(STATUS "EGL version is 1.5 or greater")
+    add_definitions(-DEGL_VERSION_GE_1_5)
+else()
+    message(STATUS "EGL version is less than 1.5")
+endif()
+
 add_subdirectory(src)
 
 include(GNUInstallDirs)
