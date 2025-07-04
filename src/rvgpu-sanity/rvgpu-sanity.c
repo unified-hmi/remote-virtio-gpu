@@ -18,7 +18,7 @@
 #include <err.h>
 #include <stdlib.h>
 
-#include <rvgpu-generic/rvgpu-utils.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 #include <rvgpu-generic/rvgpu-sanity.h>
 
 unsigned long sanity_strtounum(const char *str, unsigned long min,

@@ -20,10 +20,12 @@
 #include <err.h>
 #include <errno.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
@@ -32,8 +34,6 @@
 #include <sys/queue.h>
 #include <sys/timerfd.h>
 #include <sys/utsname.h>
-#include <time.h>
-#include <unistd.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
@@ -41,18 +41,16 @@
 #include <linux/virtio_lo.h>
 #include <linux/version.h>
 
+#include <librvgpu/rvgpu-plugin.h>
+#include <librvgpu/rvgpu-protocol.h>
+#include <libudev.h>
+
+#include <rvgpu-generic/rvgpu-capset.h>
+#include <rvgpu-generic/rvgpu-sanity.h>
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
 #include <rvgpu-proxy/gpu/rvgpu-map-guest.h>
 #include <rvgpu-proxy/gpu/rvgpu-vqueue.h>
-
-#include <librvgpu/rvgpu-plugin.h>
-#include <librvgpu/rvgpu-protocol.h>
-
-#include <rvgpu-generic/rvgpu-capset.h>
-#include <rvgpu-generic/rvgpu-sanity.h>
-
-#include <libudev.h>
 
 #define GPU_MAX_CAPDATA 16
 
@@ -311,6 +309,7 @@ struct rvgpu_backend *init_backend_rvgpu(struct host_conn *servers)
 		.conn_tmt_s = servers->conn_tmt_s,
 		.reconn_intv_ms = servers->reconn_intv_ms,
 		.scanout_num = servers->host_cnt,
+		.rvgpu_surface_id = servers->rvgpu_surface_id,
 	};
 
 	if (rvgpu_init_ctx(rvgpu_be, ctx_args)) {

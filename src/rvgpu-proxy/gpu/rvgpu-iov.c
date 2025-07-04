@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-#include <rvgpu-proxy/gpu/rvgpu-iov.h>
 #include <string.h>
+
+#include <rvgpu-proxy/gpu/rvgpu-iov.h>
 
 size_t copy_from_iov(const struct iovec iov[], size_t n, void *buffer,
 		     size_t len)

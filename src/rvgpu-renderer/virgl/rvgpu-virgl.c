@@ -16,25 +16,27 @@
  */
 
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
-#include <linux/virtio_gpu.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <stdatomic.h>
+
+#include <linux/virtio_gpu.h>
+
+#include <fcntl.h>
 #include <sys/poll.h>
 #include <sys/uio.h>
-#include <time.h>
 #include <unistd.h>
+
+#include <err.h>
 #include <virglrenderer.h>
 
 #include <rvgpu-generic/rvgpu-capset.h>
 #include <rvgpu-generic/rvgpu-sanity.h>
-#include <rvgpu-generic/rvgpu-utils.h>
-
+#include <rvgpu-utils/rvgpu-utils.h>
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <rvgpu-renderer/rvgpu-renderer.h>
 #include <rvgpu-renderer/virgl/rvgpu-virgl.h>
@@ -46,6 +48,7 @@ struct rvgpu_pr_state {
 	size_t buftotlen[2];
 	size_t bufcurlen[2];
 	size_t bufpos[2];
+	int cmd_socket;
 	int res_socket;
 	atomic_uint fence_received, fence_sent;
 };
@@ -142,14 +145,15 @@ static struct virgl_renderer_callbacks virgl_cbs = {
 static int rvgpu_pr_readbuf(struct rvgpu_pr_state *p, int stream)
 {
 	struct pollfd pfd[MAX_PFD];
-	size_t n;
+	size_t n = 0;
 	int timeout = 0;
 	struct timespec barrier_delay = { .tv_nsec = 1000 };
 
-	pfd[0].fd = 0;
+	pfd[0].fd = p->cmd_socket;
 
 	pfd[0].events = POLLIN;
-	n = rvgpu_egl_prepare_events(p->egl, &pfd[1], MAX_PFD - 1);
+	//	n = rvgpu_egl_prepare_events(p->egl, &pfd[1], MAX_PFD - 1);
+
 	if (p->fence_received == p->fence_sent)
 		timeout = -1;
 
@@ -161,7 +165,7 @@ static int rvgpu_pr_readbuf(struct rvgpu_pr_state *p, int stream)
 		if (p->fence_received == p->fence_sent)
 			timeout = -1;
 	}
-	rvgpu_egl_process_events(p->egl, &pfd[1], n);
+	//	rvgpu_egl_process_events(p->egl, &pfd[1], n);
 	if (pfd[0].revents & POLLIN) {
 		ssize_t n;
 
@@ -211,7 +215,7 @@ static size_t rvgpu_pr_read(struct rvgpu_pr_state *p, void *buf, size_t size,
 
 struct rvgpu_pr_state *rvgpu_pr_init(struct rvgpu_egl_state *e,
 				     const struct rvgpu_pr_params *params,
-				     int res_socket)
+				     int cmd_socket, int res_socket)
 {
 	int ret, buf_size;
 	struct rvgpu_pr_state *p = calloc(1, sizeof(*p));
@@ -239,6 +243,7 @@ struct rvgpu_pr_state *rvgpu_pr_init(struct rvgpu_egl_state *e,
 			clear_scanout(p, &e->scanouts[i]);
 	}
 
+	p->cmd_socket = cmd_socket;
 	p->res_socket = res_socket;
 
 	return p;
@@ -404,6 +409,7 @@ static void set_scanout(struct rvgpu_pr_state *p,
 			.res_id = set->resource_id,
 			.y0_top = info.flags & 1
 		};
+
 		if (sp->boxed) {
 			params.box = sp->box;
 		} else if (set->r.width == 0 || set->r.height == 0) {
@@ -531,14 +537,13 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 {
 	static union virtio_gpu_cmd r;
 	struct rvgpu_header uhdr;
+	static int current_scanout_id;
 
 	if (p->pp.capset)
 		dump_capset(p);
 
+	p->egl->has_submit_3d_draw = false;
 	double virgl_cmd_laptime = 0;
-	if (p->egl->fps_params.show_fps) {
-		p->egl->fps_params.rvgpu_laptime_ms = current_get_time_ms();
-	}
 	while (rvgpu_pr_read(p, &uhdr, sizeof(uhdr), 1, COMMAND) == 1) {
 		struct iovec *piov;
 		size_t ret;
@@ -554,8 +559,9 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 		if (ret != uhdr.size)
 			errx(1, "Too short read(%zu < %u)", ret, uhdr.size);
 
-		if (p->egl->fps_params.show_fps)
+		if (p->egl->scanouts[current_scanout_id].fps_params.show_fps) {
 			virgl_cmd_laptime = current_get_time_ms();
+		}
 
 		if (uhdr.flags & RVGPU_CURSOR)
 			sane = sanity_check_gpu_cursor(&r, uhdr.size, false);
@@ -567,6 +573,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 
 		virgl_renderer_force_ctx_0();
 		virgl_renderer_poll();
+		//printf("rvgpu_pr_dispatch r.hdr.type: %d\n", r.hdr.type);
 		switch (r.hdr.type) {
 		case VIRTIO_GPU_CMD_CTX_CREATE:
 			virgl_renderer_context_create(r.hdr.ctx_id,
@@ -612,6 +619,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 		case VIRTIO_GPU_CMD_SUBMIT_3D:
 			virgl_renderer_submit_cmd(r.c_cmdbuf, (int)r.hdr.ctx_id,
 						  r.c_submit.size / 4);
+			p->egl->has_submit_3d_draw = true;
 			break;
 		case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 			if (!load_resource(p, r.t_2h2d.resource_id)) {
@@ -674,12 +682,15 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 		case VIRTIO_GPU_CMD_SET_SCANOUT: {
 			struct rvgpu_scanout *s =
 				&p->egl->scanouts[r.s_set.scanout_id];
-			if (s->params.enabled)
+			if (s->params.enabled) {
 				set_scanout(p, &r.s_set, s);
+				current_scanout_id = r.s_set.scanout_id;
+			}
 			break;
 		}
 		case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
 			/* Call draw function if it's for scanout */
+			//printf("VIRTIO_GPU_CMD_RESOURCE_FLUSH\n");
 			draw = r.r_flush.resource_id;
 			break;
 		case VIRTIO_GPU_CMD_RESOURCE_UNREF:
@@ -732,9 +743,11 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 			}
 		}
 
-		if (p->egl->fps_params.show_fps)
-			p->egl->fps_params.virgl_cmd_time_ms +=
+		if (p->egl->scanouts[current_scanout_id].fps_params.show_fps) {
+			p->egl->scanouts[current_scanout_id]
+				.fps_params.virgl_cmd_time_ms +=
 				current_get_time_ms() - virgl_cmd_laptime;
+		}
 
 		if (draw)
 			return draw;

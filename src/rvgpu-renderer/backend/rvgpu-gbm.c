@@ -16,283 +16,169 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/poll.h>
+#include <sys/mman.h>
+#include <assert.h>
+#include <err.h>
+#include <errno.h>
 
-/* Include this before EGL stuff to select EGL implementation */
 #include <gbm.h>
-
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <linux/input.h>
+#include <libinput.h>
+#include <libudev.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 
-#include <sys/poll.h>
-#include <sys/mman.h>
-
-#include <assert.h>
-#include <fcntl.h>
-#include <string.h>
-#include <unistd.h>
-
-#include <err.h>
-#include <errno.h>
-
-#include <libinput.h>
-#include <libudev.h>
-#include <linux/input.h>
-
 #include <librvgpu/rvgpu-protocol.h>
+
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <rvgpu-renderer/renderer/rvgpu-input.h>
+#include <rvgpu-renderer/backend/rvgpu-gbm.h>
 
-struct rvgpu_gbm_state {
-	/* GBM structures */
-	int gbm_fd;
-	uint32_t connector;
-	drmModeCrtc *crtc;
-	drmModeModeInfo mode;
+static pthread_t gbm_event_thread;
 
-	bool flip_pending;
-	bool mode_set;
-	struct gbm_device *gbm_device;
-	struct gbm_surface *gbm_surface;
-
-	struct gbm_bo *prev_bo;
-	unsigned int prev_fb;
-
-	struct gbm_bo *current_bo;
-	unsigned int current_fb;
-
-	/* TODO: Support multiple scanouts */
-	uint32_t scanout_id;
-
-	/* EGL structures */
-	struct rvgpu_egl_state egl;
-
-	/* Input handling */
-	struct rvgpu_input_state *in;
-	struct libinput *libin;
-	struct udev *udev;
-
-	/* Cursor */
-	uint32_t cursor_w;
-	uint32_t cursor_h;
-	uint64_t cursor_size;
-	void *cursor_map;
-	uint32_t cursor_handle;
-};
-
-static inline struct rvgpu_gbm_state *to_gbm(struct rvgpu_egl_state *e)
+static void keyboard_handle_key(struct libinput_event *ev,
+				struct rvgpu_egl_state *egl)
 {
-	return rvgpu_container_of(e, struct rvgpu_gbm_state, egl);
+	struct libinput_event_keyboard *kev =
+		libinput_event_get_keyboard_event(ev);
+	uint32_t key = libinput_event_keyboard_get_key(kev);
+	uint32_t state = libinput_event_keyboard_get_key_state(kev);
+	keyboard_cb(key, state, egl);
 }
 
-static void handle_touch_event(struct rvgpu_gbm_state *g,
-			       struct libinput_event_touch *tev,
-			       enum libinput_event_type t)
+static void pointer_handle_motion(struct libinput_event *ev,
+				  struct rvgpu_egl_state *egl)
 {
+	struct libinput_event_pointer *pev =
+		libinput_event_get_pointer_event(ev);
+	double x = libinput_event_pointer_get_dx_unaccelerated(pev);
+	double y = libinput_event_pointer_get_dy_unaccelerated(pev);
+	pointer_motion_cb(x, y, egl);
+}
+
+static void pointer_handle_motion_abs(struct libinput_event *ev,
+				      struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_pointer *pev =
+		libinput_event_get_pointer_event(ev);
+	double x = libinput_event_pointer_get_absolute_x(pev);
+	double y = libinput_event_pointer_get_absolute_y(pev);
+	pointer_motion_cb(x, y, egl);
+}
+
+static void pointer_handle_button(struct libinput_event *ev,
+				  struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_pointer *pev =
+		libinput_event_get_pointer_event(ev);
+	uint32_t button = libinput_event_pointer_get_button(pev);
+	uint32_t state = libinput_event_pointer_get_button_state(pev);
+	pointer_button_cb(button, state, egl);
+}
+
+static void pointer_handle_axis(struct libinput_event *ev,
+				struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_pointer *pev =
+		libinput_event_get_pointer_event(ev);
+	if (libinput_event_pointer_has_axis(
+		    pev, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL)) {
+		uint32_t axis_h =
+			libinput_event_pointer_get_axis_value_discrete(
+				pev, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+		if (axis_h != 0)
+			pointer_axis_cb(REL_HWHEEL, axis_h, egl);
+	}
+	if (libinput_event_pointer_has_axis(
+		    pev, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL)) {
+		uint32_t axis_v =
+			libinput_event_pointer_get_axis_value_discrete(
+				pev, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+		if (axis_v != 0.0)
+			pointer_axis_cb(REL_WHEEL, axis_v, egl);
+	}
+}
+
+static void touch_handle_down(struct libinput_event *ev, int width, int height,
+			      struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_touch *tev = libinput_event_get_touch_event(ev);
 	int id = libinput_event_touch_get_slot(tev);
-	double x, y;
+	double x = libinput_event_touch_get_x_transformed(tev, width);
+	double y = libinput_event_touch_get_y_transformed(tev, height);
+	touch_down_cb(id, x, y, egl);
+}
 
-	if (g->scanout_id == VIRTIO_GPU_MAX_SCANOUTS)
-		return;
+static void touch_handle_up(struct libinput_event *ev,
+			    struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_touch *tev = libinput_event_get_touch_event(ev);
+	int id = libinput_event_touch_get_slot(tev);
+	touch_up_cb(id, egl);
+}
 
-	if (t == LIBINPUT_EVENT_TOUCH_UP) {
-		rvgpu_in_remove_slot(g->in, id);
-		rvgpu_in_send(g->in, RVGPU_INPUT_TOUCH);
-		return;
-	}
-	x = libinput_event_touch_get_x_transformed(tev, g->mode.hdisplay);
-	y = libinput_event_touch_get_y_transformed(tev, g->mode.vdisplay);
-
-	if (t == LIBINPUT_EVENT_TOUCH_DOWN) {
-		struct rvgpu_scanout *s = &g->egl.scanouts[g->scanout_id];
-		rvgpu_in_add_slot(g->in, id, s->params.id, &s->window,
-				  &s->virgl.box, &s->virgl.tex);
-	}
-	rvgpu_in_move_slot(g->in, id, x, y);
+static void touch_handle_motion(struct libinput_event *ev, int width,
+				int height, struct rvgpu_egl_state *egl)
+{
+	struct libinput_event_touch *tev = libinput_event_get_touch_event(ev);
+	int id = libinput_event_touch_get_slot(tev);
+	double x = libinput_event_touch_get_x_transformed(tev, width);
+	double y = libinput_event_touch_get_y_transformed(tev, height);
+	touch_motion_cb(id, x, y, egl);
 }
 
 static void rvgpu_gbm_input(struct rvgpu_gbm_state *g)
 {
 	struct libinput_event *ev;
-	static bool have_mouse_abs = false;
 
 	while ((ev = libinput_get_event(g->libin)) != NULL) {
 		enum libinput_event_type t = libinput_event_get_type(ev);
-
 		switch (t) {
-		case LIBINPUT_EVENT_KEYBOARD_KEY: {
-			struct libinput_event_keyboard *kev =
-				libinput_event_get_keyboard_event(ev);
-			struct rvgpu_input_event uiev = {
-				EV_KEY,
-				(uint16_t)libinput_event_keyboard_get_key(kev),
-				libinput_event_keyboard_get_key_state(kev)
-			};
-			rvgpu_in_events(g->in, RVGPU_INPUT_KEYBOARD, &uiev, 1);
-			rvgpu_in_send(g->in, RVGPU_INPUT_KEYBOARD);
+		case LIBINPUT_EVENT_KEYBOARD_KEY:
+			keyboard_handle_key(ev, &g->egl);
 			break;
-		}
-		case LIBINPUT_EVENT_POINTER_MOTION: {
-			struct libinput_event_pointer *pev =
-				libinput_event_get_pointer_event(ev);
-			double dx = libinput_event_pointer_get_dx_unaccelerated(
-				       pev),
-			       dy = libinput_event_pointer_get_dy_unaccelerated(
-				       pev);
-			struct rvgpu_input_event uiev[] = {
-				{ EV_REL, REL_X, (int32_t)dx },
-				{ EV_REL, REL_Y, (int32_t)dy },
-			};
-			if (dx == 0.0) {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE,
-						&uiev[1], 1);
-			} else if (dy == 0.0) {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE,
-						&uiev[0], 1);
-			} else {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE, uiev,
-						2);
-			}
-			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
+		case LIBINPUT_EVENT_POINTER_MOTION:
+			pointer_handle_motion(ev, &g->egl);
 			break;
-		}
-
-		case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: {
-			struct libinput_event_pointer *pev =
-				libinput_event_get_pointer_event(ev);
-
-			have_mouse_abs = true;
-
-			double x = libinput_event_pointer_get_absolute_x(pev);
-			double y = libinput_event_pointer_get_absolute_y(pev);
-
-			struct rvgpu_input_event uiev[] = {
-				{ EV_ABS, ABS_X, (int32_t)x },
-				{ EV_ABS, ABS_Y, (int32_t)y },
-			};
-
-			rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE_ABS, uiev, 2);
-			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE_ABS);
+		case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+			pointer_handle_motion_abs(ev, &g->egl);
 			break;
-		}
-
-		case LIBINPUT_EVENT_POINTER_BUTTON: {
-			struct libinput_event_pointer *pev =
-				libinput_event_get_pointer_event(ev);
-			struct rvgpu_input_event uiev = {
-				EV_KEY,
-				(uint16_t)libinput_event_pointer_get_button(
-					pev),
-				libinput_event_pointer_get_button_state(pev)
-			};
-			if (have_mouse_abs) {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE_ABS, &uiev, 1);
-				rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE_ABS);
-			} else {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE, &uiev, 1);
-				rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
-			}
+		case LIBINPUT_EVENT_POINTER_BUTTON:
+			pointer_handle_button(ev, &g->egl);
 			break;
-		}
-		case LIBINPUT_EVENT_POINTER_AXIS: {
-			struct libinput_event_pointer *pev =
-				libinput_event_get_pointer_event(ev);
-			double hor = libinput_event_pointer_get_axis_value_discrete(
-				       pev,
-				       LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL),
-			       vert = libinput_event_pointer_get_axis_value_discrete(
-				       pev,
-				       LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
-			struct rvgpu_input_event uiev[] = {
-				{ EV_REL, REL_HWHEEL, (int32_t)hor },
-				{ EV_REL, REL_WHEEL, (int32_t)vert },
-			};
-			if (hor == 0.0) {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE,
-						&uiev[1], 1);
-			} else if (vert == 0.0) {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE,
-						&uiev[0], 1);
-			} else {
-				rvgpu_in_events(g->in, RVGPU_INPUT_MOUSE, uiev,
-						2);
-			}
-			rvgpu_in_send(g->in, RVGPU_INPUT_MOUSE);
+		case LIBINPUT_EVENT_POINTER_AXIS:
+			pointer_handle_axis(ev, &g->egl);
 			break;
-		}
 		case LIBINPUT_EVENT_TOUCH_FRAME:
-			rvgpu_in_send(g->in, RVGPU_INPUT_TOUCH);
+			touch_frame_cb(&g->egl);
 			break;
 		case LIBINPUT_EVENT_TOUCH_CANCEL:
-			rvgpu_in_clear(g->in, RVGPU_INPUT_TOUCH);
+			touch_cancel_cb(&g->egl);
 			break;
 		case LIBINPUT_EVENT_TOUCH_DOWN:
-		case LIBINPUT_EVENT_TOUCH_MOTION:
-		case LIBINPUT_EVENT_TOUCH_UP: {
-			struct libinput_event_touch *tev =
-				libinput_event_get_touch_event(ev);
-			handle_touch_event(g, tev, t);
+			touch_handle_down(ev, g->mode.hdisplay,
+					  g->mode.vdisplay, &g->egl);
 			break;
-		}
+		case LIBINPUT_EVENT_TOUCH_MOTION:
+			touch_handle_motion(ev, g->mode.hdisplay,
+					    g->mode.vdisplay, &g->egl);
+			break;
+		case LIBINPUT_EVENT_TOUCH_UP:
+			touch_handle_up(ev, &g->egl);
+			break;
 		default:
 			break;
 		}
 		libinput_event_destroy(ev);
 	}
-}
-
-static void rvgpu_gbm_free(struct rvgpu_egl_state *e)
-{
-	struct rvgpu_gbm_state *g = to_gbm(e);
-
-	rvgpu_in_free(g->in);
-	libinput_unref(g->libin);
-	udev_unref(g->udev);
-
-	/* GBM deinit */
-	drmModeSetCrtc(g->gbm_fd, g->crtc->crtc_id, g->crtc->buffer_id,
-		       g->crtc->x, g->crtc->y, &g->connector, 1,
-		       &g->crtc->mode);
-	drmModeFreeCrtc(g->crtc);
-
-	if (g->prev_bo) {
-		drmModeRmFB(g->gbm_fd, g->prev_fb);
-		gbm_surface_release_buffer(g->gbm_surface, g->prev_bo);
-	}
-
-	if (g->current_bo) {
-		drmModeRmFB(g->gbm_fd, g->current_fb);
-		gbm_surface_release_buffer(g->gbm_surface, g->current_bo);
-	}
-
-	gbm_surface_destroy(g->gbm_surface);
-	gbm_device_destroy(g->gbm_device);
-
-	close(g->gbm_fd);
-	free(g);
-}
-
-static void rvgpu_gbm_create_scanout(struct rvgpu_egl_state *e,
-				     struct rvgpu_scanout *s)
-{
-	struct rvgpu_gbm_state *g = to_gbm(e);
-
-	if (g->scanout_id != VIRTIO_GPU_MAX_SCANOUTS)
-		errx(1, "GBM backend only supports one scanout for now!");
-
-	s->native = (struct rvgpu_native *)g;
-	g->scanout_id = s->scanout_id;
-	s->window.h = g->mode.vdisplay;
-	s->window.w = g->mode.hdisplay;
-	s->surface =
-		eglCreateWindowSurface(e->dpy, e->config, g->gbm_surface, NULL);
-	assert(s->surface);
-
-	eglMakeCurrent(e->dpy, s->surface, s->surface, e->context);
-	glGenFramebuffers(1, &s->fb);
 }
 
 static void rvgpu_gbm_page_flip_handler(int fd, unsigned int sequence,
@@ -321,11 +207,10 @@ static drmEventContext gbm_evctx = {
 	.page_flip_handler = rvgpu_gbm_page_flip_handler,
 };
 
-static void rvgpu_gbm_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
-			   bool vsync)
+void rvgpu_gbm_swap(void *param, bool vsync)
 {
-	(void)vsync;
-	struct rvgpu_gbm_state *g = to_gbm(e);
+	struct rvgpu_egl_state *egl = (struct rvgpu_egl_state *)param;
+	struct rvgpu_gbm_state *g = to_gbm(egl);
 	unsigned int fb;
 	struct gbm_bo *bo;
 	unsigned int handle, stride;
@@ -333,14 +218,14 @@ static void rvgpu_gbm_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 	if (g->flip_pending)
 		return;
 
-	eglSwapBuffers(e->dpy, s->surface);
+	eglSwapBuffers(egl->dpy, egl->sfc);
 
 	bo = gbm_surface_lock_front_buffer(g->gbm_surface);
 	handle = gbm_bo_get_handle(bo).u32;
 	stride = gbm_bo_get_stride(bo);
 
-	drmModeAddFB(g->gbm_fd, s->window.w, s->window.h, 24, 32, stride,
-		     handle, &fb);
+	drmModeAddFB(g->gbm_fd, g->mode.hdisplay, g->mode.vdisplay, 24, 32,
+		     stride, handle, &fb);
 	if (!g->mode_set) {
 		drmModeSetCrtc(g->gbm_fd, g->crtc->crtc_id, fb, 0, 0,
 			       &g->connector, 1, &g->mode);
@@ -361,40 +246,30 @@ static void rvgpu_gbm_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 	g->current_fb = fb;
 }
 
-static size_t rvgpu_gbm_prepare_events(struct rvgpu_egl_state *e, void *ev,
-				       size_t max)
+static void *event_loop(void *arg)
 {
+	struct rvgpu_egl_state *e = (struct rvgpu_egl_state *)arg;
 	struct rvgpu_gbm_state *g = to_gbm(e);
-
-	assert(max >= 2);
-	(void)max;
-	struct pollfd *fds = (struct pollfd *)ev;
-
+	struct pollfd fds[2];
 	fds[0].fd = g->gbm_fd;
 	fds[0].events = POLLIN;
 	fds[1].fd = libinput_get_fd(g->libin);
 	fds[1].events = POLLIN;
-	return 2u;
-}
+	while (1) {
+		int ret = poll(fds, 2, -1);
+		if (ret < 0) {
+			perror("poll");
+			break;
+		}
+		if (fds[0].revents)
+			drmHandleEvent(g->gbm_fd, &gbm_evctx);
 
-static void rvgpu_gbm_process_events(struct rvgpu_egl_state *e, const void *ev,
-				     size_t n)
-{
-	struct rvgpu_gbm_state *g = to_gbm(e);
-	short revents[n];
-
-	assert(n >= 2);
-	struct pollfd *fds = (struct pollfd *)ev;
-
-	revents[0] = fds[0].revents;
-	revents[1] = fds[1].revents;
-	if (revents[0])
-		drmHandleEvent(g->gbm_fd, &gbm_evctx);
-
-	if (revents[1]) {
-		libinput_dispatch(g->libin);
-		rvgpu_gbm_input(g);
+		if (fds[1].revents) {
+			libinput_dispatch(g->libin);
+			rvgpu_gbm_input(g);
+		}
 	}
+	return NULL;
 }
 
 /*
@@ -513,35 +388,6 @@ static void rvgpu_cursor_done(struct rvgpu_gbm_state *g)
 }
 #endif
 
-static void rvgpu_set_cursor(struct rvgpu_egl_state *e, uint32_t dw, uint32_t dh, void *data)
-{
-	struct rvgpu_gbm_state *g = to_gbm(e);
-
-	if (g->cursor_w != dw || g->cursor_h != dh)
-		return;
-
-	memcpy(g->cursor_map, data, g->cursor_size);
-
-	drmModeSetCursor(g->gbm_fd, g->crtc->crtc_id, g->cursor_handle, g->cursor_w, g->cursor_h);
-}
-
-static void rvgpu_move_cursor(struct rvgpu_egl_state *e, uint32_t x, uint32_t y)
-{
-	struct rvgpu_gbm_state *g = to_gbm(e);
-
-	drmModeMoveCursor(g->gbm_fd, g->crtc->crtc_id, x, y);
-}
-
-static const struct rvgpu_egl_callbacks gbm_callbacks = {
-	.free = rvgpu_gbm_free,
-	.draw = rvgpu_gbm_draw,
-	.create_scanout = rvgpu_gbm_create_scanout,
-	.prepare_events = rvgpu_gbm_prepare_events,
-	.process_events = rvgpu_gbm_process_events,
-	.set_cursor = rvgpu_set_cursor,
-	.move_cursor = rvgpu_move_cursor
-};
-
 static int open_restricted(const char *path, int flags, void *user_data)
 {
 	(void)user_data;
@@ -561,18 +407,110 @@ static const struct libinput_interface interface = {
 	.close_restricted = close_restricted,
 };
 
-#define NATIVE_GBM_FORMAT GBM_FORMAT_XRGB8888
-
-struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
-				       FILE *events_out)
+const char *get_gbm_format_name(uint32_t format)
 {
+	switch (format) {
+	case GBM_FORMAT_ARGB8888:
+		return "GBM_FORMAT_ARGB8888";
+	case GBM_FORMAT_XRGB8888:
+		return "GBM_FORMAT_XRGB8888";
+	case GBM_FORMAT_RGB565:
+		return "GBM_FORMAT_RGB565";
+	case GBM_FORMAT_XRGB2101010:
+		return "GBM_FORMAT_XRGB2101010";
+	case GBM_FORMAT_ARGB2101010:
+		return "GBM_FORMAT_ARGB2101010";
+	case GBM_FORMAT_YUYV:
+		return "GBM_FORMAT_YUYV";
+	case GBM_FORMAT_NV12:
+		return "GBM_FORMAT_NV12";
+	default:
+		return "UNKNOWN FORMAT";
+	}
+}
+
+uint32_t get_gbm_format(struct gbm_device *gbm)
+{
+	uint32_t formats[] = { GBM_FORMAT_ARGB8888,    GBM_FORMAT_XRGB8888,
+			       GBM_FORMAT_RGB565,      GBM_FORMAT_XRGB2101010,
+			       GBM_FORMAT_ARGB2101010, GBM_FORMAT_YUYV,
+			       GBM_FORMAT_NV12 };
+	size_t num_formats = sizeof(formats) / sizeof(formats[0]);
+	for (size_t i = 0; i < num_formats; ++i) {
+		struct gbm_surface *surface = gbm_surface_create(
+			gbm, 128, 128, formats[i],
+			GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		if (surface) {
+			printf("%s (0x%x) is supported.\n",
+			       get_gbm_format_name(formats[i]), formats[i]);
+			gbm_surface_destroy(surface);
+			return formats[i];
+		} else {
+			printf("%s (0x%x) is not supported.\n",
+			       get_gbm_format_name(formats[i]), formats[i]);
+		}
+	}
+	return GBM_FORMAT_ARGB8888;
+}
+
+void rvgpu_gbm_free(struct rvgpu_egl_state *e)
+{
+	struct rvgpu_gbm_state *g = to_gbm(e);
+
+	libinput_unref(g->libin);
+	udev_unref(g->udev);
+
+	/* GBM deinit */
+	drmModeSetCrtc(g->gbm_fd, g->crtc->crtc_id, g->crtc->buffer_id,
+		       g->crtc->x, g->crtc->y, &g->connector, 1,
+		       &g->crtc->mode);
+	drmModeFreeCrtc(g->crtc);
+
+	if (g->prev_bo) {
+		drmModeRmFB(g->gbm_fd, g->prev_fb);
+		gbm_surface_release_buffer(g->gbm_surface, g->prev_bo);
+	}
+
+	if (g->current_bo) {
+		drmModeRmFB(g->gbm_fd, g->current_fb);
+		gbm_surface_release_buffer(g->gbm_surface, g->current_bo);
+	}
+
+	gbm_surface_destroy(g->gbm_surface);
+	gbm_device_destroy(g->gbm_device);
+
+	close(g->gbm_fd);
+	free(g);
+}
+
+void *create_gbm_native_display(const char *device)
+{
+	int drm_fd = open(device, O_RDWR | O_CLOEXEC);
+	struct gbm_device *gbm = gbm_create_device(drm_fd);
+	void *native_dpy = (void *)gbm;
+	close(drm_fd);
+	return native_dpy;
+}
+
+void destroy_gbm_native_display(void *native_dpy)
+{
+	struct gbm_device *gbm = (struct gbm_device *)native_dpy;
+	if (gbm) {
+		gbm_device_destroy(gbm);
+	}
+}
+
+void *rvgpu_gbm_init(void *params, int *width, int *height)
+{
+	rvgpu_gbm_params *gbm_params = (rvgpu_gbm_params *)params;
+	const char *device = gbm_params->device;
+	const char *seat = gbm_params->seat;
 	struct rvgpu_gbm_state *g = calloc(1, sizeof(*g));
 	drmModeRes *res;
 	drmModeConnector *connector = NULL;
 	drmModeEncoder *encoder;
 
 	assert(g);
-	g->scanout_id = VIRTIO_GPU_MAX_SCANOUTS;
 
 	g->gbm_fd = open(device, O_RDWR);
 	if (g->gbm_fd == -1)
@@ -633,20 +571,20 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 
 	/* GBM requires to use a specific native format */
 	g->egl.use_native_format = true;
-	g->egl.native_format = NATIVE_GBM_FORMAT;
+	g->egl.native_format = get_gbm_format(g->gbm_device);
 
 	rvgpu_egl_init_context(&g->egl);
 
 	g->gbm_surface =
 		gbm_surface_create(g->gbm_device, g->mode.hdisplay,
-				   g->mode.vdisplay, NATIVE_GBM_FORMAT,
+				   g->mode.vdisplay, g->egl.native_format,
 				   GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 	assert(g->gbm_surface);
+	*width = g->mode.hdisplay;
+	*height = g->mode.vdisplay;
+	g->egl.sfc = eglCreateWindowSurface(g->egl.dpy, g->egl.config,
+					    g->gbm_surface, NULL);
 
-	g->egl.cb = &gbm_callbacks;
-
-	/* input initialization */
-	g->in = rvgpu_in_init(events_out);
 	g->udev = udev_new();
 	g->libin = libinput_udev_create_context(&interface, NULL, g->udev);
 	libinput_log_set_priority(g->libin, LIBINPUT_LOG_PRIORITY_INFO);
@@ -655,5 +593,6 @@ struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
 
 	rvgpu_cursor_init(g);
 
+	pthread_create(&gbm_event_thread, NULL, event_loop, &g->egl);
 	return &g->egl;
 }

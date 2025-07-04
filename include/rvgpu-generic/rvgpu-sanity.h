@@ -18,11 +18,11 @@
 #ifndef RVGPU_SANITY_H
 #define RVGPU_SANITY_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <linux/virtio_gpu.h>
-#include <stdbool.h>
-#include <stddef.h>
 
 union virtio_gpu_cmd {
 	struct virtio_gpu_ctrl_hdr hdr;

@@ -19,21 +19,25 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/timerfd.h>
-#include <time.h>
-#include <unistd.h>
+
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+
+#include <pthread.h>
 
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu.h>
+
+#include <rvgpu-utils/rvgpu-utils.h>
 
 struct poll_entries {
 	struct pollfd *ses_timer;
@@ -569,6 +573,11 @@ void *thread_conn_tcp(void *arg)
 		      conn_args->conn_tmt_s);
 	connect_hosts(ctx_priv->res, ctx_priv->res_count,
 		      conn_args->conn_tmt_s);
+
+	for (int i = 0; i < ctx_priv->cmd_count; i++) {
+		send_str_with_size(ctx_priv->cmd[i].sock,
+				   conn_args->rvgpu_surface_id);
+	}
 
 	pfd_count = set_pfd(ctx_priv, vhost, pfd, &p_entry);
 	assert(pfd_count < MAX_HOSTS * SOCKET_NUM);

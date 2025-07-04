@@ -85,7 +85,8 @@ You have two options for installing RVGPU: either build from source code ([Build
   Specify the correct version of `X.X.X` by referring to https://github.com/unified-hmi/remote-virtio-gpu/releases/latest  
   For example: `remote-virtio-gpu_1.2.0.deb`.
 
-  **Note:** An error about unresolved dependencies will occur when executing the following 2nd command, `sudo dpkg -i remote-virtio-gpu_X.X.X.deb`. This error can be resolved by running the 3rd one, `sudo apt -f install`.
+  **Note:**
+  An error about unresolved dependencies will occur when executing the following 2nd command, `sudo dpkg -i remote-virtio-gpu_X.X.X.deb`. This error can be resolved by running the 3rd one, `sudo apt -f install`.
 
   ```
   wget https://github.com/unified-hmi/remote-virtio-gpu/releases/latest/download/remote-virtio-gpu_X.X.X.deb
@@ -123,9 +124,10 @@ Open a terminal and run this command:
 ```
 rvgpu-renderer -b 1280x720@0,0 -p 55667
 ```
-After this command, launching rvgpu-proxy will make the rvgpu-renderer create a window.
 
-### Using Ubuntu (default)
+After this command, `rvgpu-renderer` will create a window. The `-a` option enables transparency for the window.
+
+### Using weston
 You can launch a dedicated instance of Weston and run `rvgpu-renderer`
 inside it.
 
@@ -134,9 +136,8 @@ weston --width 2200 --height 1200 &
 rvgpu-renderer -b 1280x720@0,0 -p 55667
 ```
 
-This command will create a weston window. Launching rvgpu-proxy will make the rvgpu-renderer create nested subwindow.
-The script does not require the window system uses Wayland protocol,
-so it could be run under X Window system.
+This command will create a `weston` window, and within that environment, `rvgpu-renderer` will generate its own window on top.
+If your system does not natively support the Wayland protocol, you can use `weston` as an alternative to enable `rvgpu-renderer` to run on window systems like the X Window System or others.
 
 ## Run rvgpu-proxy
 
@@ -147,20 +148,43 @@ so it should be run with superuser privileges.
 sudo -i
 modprobe virtio-gpu
 modprobe virtio-lo
-rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667
 ```
-**Note:** Those who have performed "Building from source" please follow the instructions below.
+
+**Note:**
+Those who have performed "Building from source" please follow the instructions below.
+
 ```
 rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667 -c /usr/local/etc/virgl.capset
 ```
 
-After you run this, another GPU node `/dev/dri/cardX` appear.
-Also, if you are running `rvgpu-renderer` in Wayland mode, it create 
-a new window.
+After running this command, a new GPU node `/dev/dri/cardX` will appear. Additionally, a symbolic link named `rvgpu_virtio` will be created, pointing to this new GPU node. To customize the symbolic link name with an index, run the following command before starting `rvgpu-proxy`.
+
+```
+echo "0" > /tmp/rvgpu-index
+```
+
+This allows you to set a specific index for easier identification of the symbolic link.
+
+### Using Multiple rvgpu-proxy with rvgpu-renderer
+
+`rvgpu-renderer` supports connecting multiple rvgpu-proxy for composite display. To achieve this, you can start additional `rvgpu-proxy` with different configurations. For example:
+
+```
+echo "0" > /tmp/rvgpu-index
+rvgpu-proxy -s 1280x720@0,0 -n 127.0.0.1:55667 -c /usr/local/etc/virgl.capset
+echo "1" > /tmp/rvgpu-index
+rvgpu-proxy -s 800x600@0,0 -n 127.0.0.1:55667 -c /usr/local/etc/virgl.capset
+```
+
+Each `rvgpu-proxy` can render different content, and `rvgpu-renderer` will composite these outputs into a single display, providing a unified view of all connected proxies.
+
+**Note:**
+`rvgpu-renderer` composites the rendering outputs from each rvgpu-proxy directly, starting from the top-left corner, without clipping or scaling.
 
 ### Run Wayland Server on RVGPU
 
-You can test the new GPU node by running `rvgpu-wlproxy` as a lightweight Wayland server:
+To test the new GPU node, you can run `rvgpu-wlproxy` as a lightweight Wayland server. Set the necessary environment variables and execute the following command:
+
 ```
 export EGLWINSYS_DRM_DEV_NAME="/dev/dri/rvgpu_virtio"
 export EGLWINSYS_DRM_MOUSE_DEV="/dev/input/rvgpu_mouse"
@@ -168,24 +192,27 @@ export EGLWINSYS_DRM_MOUSEABS_DEV="/dev/input/rvgpu_mouse_abs"
 export EGLWINSYS_DRM_KEYBOARD_DEV="/dev/input/rvgpu_keyboard"
 export EGLWINSYS_DRM_TOUCH_DEV="/dev/input/rvgpu_touch"
 export XDG_RUNTIME_DIR="/tmp"
-rvgpu-wlproxy -S wayland-rvgpu-0
+rvgpu-wlproxy -S wayland-rvgpu
 ```
 
-Alternatively, if you have Weston version 8.0.93 or higher, you can use it instead:
+Alternatively, if you have Weston version 8.0.93 or higher, you can use Weston as the Wayland server:
+
 ```
 export XDG_RUNTIME_DIR=/tmp
-weston --backend drm-backend.so --drm-device=<your cardX> --seat=seat_virtual  -S wayland-rvgpu-0
+weston --backend drm-backend.so --drm-device=<your cardX> --seat=seat_virtual  -S wayland-rvgpu -i 0
 ```
+
+**Note:**
+The index specified in your setup can affect the naming of symbolic links for input devices and DRM devices generated by `rvgpu-proxy`. Ensure that the index matches your intended setup, especially when using multiple `rvgpu-proxy`.
 
 ### Launch Wayland Application
 
-After that `rvgpu-renderer` will display weston rendered and transferred
-via localhost by `rvgpu-proxy`. Now you can launch `glmark2-es2-wayland` or
-some other graphical application to verify that everything works.
+Once the wayland server is running, `rvgpu-renderer` will display the content rendered by the wayland server, which is transferred via `rvgpu-proxy` over localhost. You can then launch wayland applications like `glmark2-es2-wayland` to verify that everything is functioning correctly.
+
 ```
 sudo apt install glmark2-es2-wayland
 export XDG_RUNTIME_DIR=/tmp
-export WAYLAND_DISPLAY=wayland-rvgpu-0
+export WAYLAND_DISPLAY=wayland-rvgpu
 glmark2-es2-wayland -s 1280x720
 ```
 
@@ -196,7 +223,7 @@ The way is almost the same as to run **RVGPU** locally. Launch
 on the another one, and pass the IP address and port number on which
 rvgpu-renderer is listening to `rvgpu-proxy` through `-n` option.
 
-**Note**  
+**Note:**
 Some graphical applications generate much network traffic. It is recommended to Configure the network to 1Gbps speed.
 
 ## Capsets

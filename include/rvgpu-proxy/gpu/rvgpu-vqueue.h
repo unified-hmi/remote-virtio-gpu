@@ -18,11 +18,12 @@
 #ifndef RVGPU_VQUEUE_H
 #define RVGPU_VQUEUE_H
 
-#include <linux/virtio_ring.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/uio.h>
+
+#include <linux/virtio_ring.h>
 
 /**
  * @brief Virtqueue structure (device part)

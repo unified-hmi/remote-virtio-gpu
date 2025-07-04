@@ -20,19 +20,21 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <time.h>
+
+#include <jansson.h>
 
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <librvgpu/rvgpu-protocol.h>
 
-#include <time.h>
-
 #define MIN_PORT_NUMBER 1
 #define MAX_PORT_NUMBER 65535
 
-#define BACKEND_COLOR 0x00FF0033
+#define BACKEND_COLOR 0x00000000
 #define BACKLOG 5 /* Passed to listen() as max connections */
 
 #define RVGPU_DEFAULT_PORT 55667
+#define RVGPU_DEFAULT_VSYNC_FRAMERATE 60
 
 struct rvgpu_pr_state;
 struct rvgpu_scanout_params;
@@ -54,7 +56,7 @@ struct rvgpu_pr_params {
  */
 struct rvgpu_pr_state *rvgpu_pr_init(struct rvgpu_egl_state *e,
 				     const struct rvgpu_pr_params *params,
-				     int res_socket);
+				     int cmd_socket, int res_socket);
 
 /** Dispatch protocol events */
 unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p);
@@ -62,13 +64,6 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p);
 /** Free protocol resources */
 void rvgpu_pr_free(struct rvgpu_pr_state *p);
 
-/** Initialize GBM frontend */
-struct rvgpu_egl_state *rvgpu_gbm_init(const char *device, const char *seat,
-				       FILE *events_out);
-
-/** Initialize Wayland frontend */
-struct rvgpu_egl_state *rvgpu_wl_init(bool fullscreen, bool translucent,
-				      FILE *events_out);
 
 static inline double current_get_time_ms()
 {

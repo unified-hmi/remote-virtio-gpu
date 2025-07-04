@@ -18,8 +18,8 @@
 #ifndef RVGPU_H
 #define RVGPU_H
 
-#include <arpa/inet.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 #include <sys/queue.h>
 
 #include <librvgpu/rvgpu-plugin.h>

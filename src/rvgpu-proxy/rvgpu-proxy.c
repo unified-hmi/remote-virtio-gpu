@@ -16,7 +16,6 @@
  */
 
 #include <assert.h>
-#include <dlfcn.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -24,19 +23,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/poll.h>
-#include <unistd.h>
+
+#include <librvgpu/rvgpu-plugin.h>
+#include <librvgpu/rvgpu-protocol.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-input-device.h>
 #include <rvgpu-proxy/rvgpu-proxy.h>
 
-#include <librvgpu/rvgpu-plugin.h>
-#include <librvgpu/rvgpu-protocol.h>
-
 #include <rvgpu-generic/rvgpu-sanity.h>
-#include <rvgpu-generic/rvgpu-utils.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 
 static void usage(void)
 {
@@ -47,6 +46,7 @@ static void usage(void)
 	info("\t-s scanout\tspecify scanout in form WxH@X,Y (default: %ux%u@0,0)\n",
 	     DEFAULT_WIDTH, DEFAULT_HEIGHT);
 	info("\t-f rate\t\tspecify virtual framerate (default: disabled)\n");
+	info("\t-i id\tspecify rvgpu surface id\n");
 	info("\t-n\t\tserver:port for connecting (max 4 hosts, default: %s:%s)\n",
 	     RVGPU_DEFAULT_HOSTNAME, RVGPU_DEFAULT_PORT);
 	info("\t-h\t\tshow this message\n");
@@ -92,6 +92,7 @@ int main(int argc, char **argv)
 		.conn_tmt_s = RVGPU_DEFAULT_CONN_TMT_S,
 		.reconn_intv_ms = RVGPU_RECONN_INVL_MS,
 		.active = true,
+		.rvgpu_surface_id = "no",
 	};
 
 	pthread_t input_thread;
@@ -99,12 +100,15 @@ int main(int argc, char **argv)
 	int lo_fd, epoll_fd, opt, capset = -1;
 	char *ip, *port, *errstr = NULL;
 
-	while ((opt = getopt(argc, argv, "hn:M:c:R:f:s:")) != -1) {
+	while ((opt = getopt(argc, argv, "hi:n:M:c:R:f:s:")) != -1) {
 		switch (opt) {
 		case 'c':
 			capset = open(optarg, O_RDONLY);
 			if (capset == -1)
 				err(1, "open %s", optarg);
+			break;
+		case 'i':
+			servers.rvgpu_surface_id = optarg;
 			break;
 		case 'M':
 			params.mem_limit = (unsigned int)sanity_strtonum(

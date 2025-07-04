@@ -15,27 +15,5 @@
 # limitations under the License.
 #
 
-add_library(rvgpu SHARED
-	tcp/rvgpu-tcp.c
-	res/rvgpu-res.c
-	rvgpu.c
-	$<TARGET_OBJECTS:rvgpu-utils>
-)
-set_target_properties(rvgpu
-	PROPERTIES
-	VERSION    ${LIBRVGPU_VERSION}
-	SOVERSION  ${LIBRVGPU_SOVERSION}
-	)
-target_link_libraries(rvgpu PRIVATE pthread)
-target_include_directories(rvgpu
-	PRIVATE
-		${PROJECT_SOURCE_DIR}/include
-		${extlibs_INCLUDE_DIRS}
-	)
-target_compile_definitions(rvgpu PRIVATE
-	_DEFAULT_SOURCE
-	_GNU_SOURCE)
-install(TARGETS rvgpu
-	ARCHIVE DESTINATION lib
-	LIBRARY DESTINATION lib
-	RUNTIME DESTINATION bin)
+add_subdirectory(rvgpu-wm)
+add_subdirectory(rvgpu-distrib-com)
