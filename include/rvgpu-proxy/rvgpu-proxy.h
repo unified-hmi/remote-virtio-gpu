@@ -58,6 +58,7 @@ struct host_conn {
 	unsigned int conn_tmt_s;
 	unsigned int reconn_intv_ms;
 	bool active;
+	char *rvgpu_surface_id;
 };
 
 #endif /* RVGPU_PROXY_H */

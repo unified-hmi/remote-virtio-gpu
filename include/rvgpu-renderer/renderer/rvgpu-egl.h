@@ -18,15 +18,31 @@
 #ifndef RVGPU_EGL_H
 #define RVGPU_EGL_H
 
-#include <EGL/egl.h>
-#include <GLES3/gl3.h>
-#include <linux/virtio_gpu.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <sys/poll.h>
 #include <sys/queue.h>
-#include <stdio.h>
+#include <pthread.h>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl3.h>
+
+#include <linux/virtio_gpu.h>
+
+#include <jansson.h>
+
+#define SHM_MUTEX "/shm_mutex"
+
+#define EGL_GET_PROC_ADDR(name)                                                \
+	do {                                                                   \
+		name = (void *)eglGetProcAddress(#name);                       \
+		if (!name) {                                                   \
+			fprintf(stderr, "%s\n", __FUNCTION__);                 \
+		}                                                              \
+	} while (0)
 
 struct pollfd;
 
@@ -37,12 +53,37 @@ struct rvgpu_egl_params {
 	unsigned int clear_color; /**< Color of empty screen */
 };
 
+struct rvgpu_buffer_state {
+	int shared_buffer_fd_index;
+	EGLImageKHR eglImages[2];
+	void *shared_buffer_handles[2];
+	uint32_t width[2];
+	uint32_t height[2];
+};
+
 struct rvgpu_fps_params {
 	bool show_fps;
 	double rvgpu_laptime_ms;
 	double virgl_cmd_time_ms;
 	int swap_cnt;
+	char *fps_dump_path;
 	FILE *fps_dump_fp;
+};
+
+struct rvgpu_focus_state {
+	json_t *touch_focused_json_obj;
+	json_t *pointer_focused_json_obj;
+	json_t *keyboard_focused_json_obj;
+	double pre_pointer_pos_x;
+	double pre_pointer_pos_y;
+	pthread_mutex_t *input_send_event_mutex;
+};
+
+struct rvgpu_draw_list_params {
+	json_t *rvgpu_surface_list;
+	json_t *rvgpu_layout_list;
+	pthread_mutex_t *surface_list_mutex;
+	pthread_mutex_t *layout_list_mutex;
 };
 
 struct rvgpu_box {
@@ -77,6 +118,9 @@ struct rvgpu_scanout {
 	EGLSurface surface;
 	/* Framebuffer for drawing */
 	unsigned int fb;
+	unsigned int shm_pb;
+	unsigned int dma_fb[2];
+	unsigned int dma_tex[2];
 	/* Output window parameters */
 	struct rvgpu_box window;
 	/* Glue to native system */
@@ -85,6 +129,8 @@ struct rvgpu_scanout {
 	unsigned int scanout_id;
 	/* Scanout params */
 	struct rvgpu_scanout_params params;
+	struct rvgpu_buffer_state *buf_state;
+	struct rvgpu_fps_params fps_params;
 	/* Linked list entry */
 	LIST_ENTRY(rvgpu_scanout) rvgpu_scanout_node;
 };
@@ -129,14 +175,17 @@ struct rvgpu_egl_state {
 
 	/* EGL pointers */
 	EGLDisplay dpy;
+	EGLSurface sfc;
 	EGLConfig config;
 	EGLContext context;
-
+	char *rvgpu_surface_id;
+	int server_rvgpu_fd;
+	bool hardware_buffer_enabled;
 	/* callbacks */
 	const struct rvgpu_egl_callbacks *cb;
 
 	/* additional params */
-	struct rvgpu_egl_params *params;
+	struct rvgpu_egl_params egl_params;
 
 	/* backend requires specific native buffer format */
 	bool use_native_format;
@@ -145,7 +194,9 @@ struct rvgpu_egl_state {
 	/* support GPU commands synchronization between rvgpu and virglrenderer */
 	struct rvgpu_glsyncobjs_state *glsyncobjs_state;
 
-	struct rvgpu_fps_params fps_params;
+	bool has_submit_3d_draw;
+	struct rvgpu_focus_state focus_state;
+	struct rvgpu_draw_list_params *draw_list_params;
 };
 
 /** Initialize main context */
@@ -205,7 +256,11 @@ void rvgpu_destroy_vscanout(struct rvgpu_egl_state *e, struct rvgpu_scanout *s);
 /** Destroy all virtual scanouts */
 void rvgpu_destroy_all_vscanouts(struct rvgpu_egl_state *e);
 
-void rvgpu_init_fps_dump(FILE **fps_dump_fp);
+void rvgpu_init_glsyncobjs_state(
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state, void *current_ctx);
+
+void rvgpu_glsyncobjs_state_free(
+	struct rvgpu_glsyncobjs_state *glsyncobjs_state);
 
 /** Container of macro for callback implementation */
 #define rvgpu_container_of(ptr, typ, member)                                   \

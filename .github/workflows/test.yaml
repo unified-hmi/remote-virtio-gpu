@@ -37,7 +37,7 @@ jobs:
           echo "INSTALL_DIR=${INSTALL_DIR}"         >> $GITHUB_ENV
 
       - name: Install build dependencies
-        run: sudo apt update && sudo apt install -y cmake ninja-build libvirglrenderer-dev libinput-dev libdrm-dev libegl1-mesa-dev libwayland-dev
+        run: sudo apt update && sudo apt install -y cmake ninja-build libvirglrenderer-dev libinput-dev libdrm-dev libegl1-mesa-dev libwayland-dev libjansson-dev
 
       - name: Fetch virtio-lo development package
         uses: robinraju/release-downloader@v1.8
