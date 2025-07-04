@@ -18,15 +18,16 @@
 #ifndef RVGPU_GPU_DEVICE_H
 #define RVGPU_GPU_DEVICE_H
 
-#include <linux/virtio_gpu.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
-#include <rvgpu-proxy/rvgpu-proxy.h>
+#include <linux/virtio_gpu.h>
 
 #include <librvgpu/rvgpu-plugin.h>
+
+#include <rvgpu-proxy/rvgpu-proxy.h>
 
 #define PIPE_READ (0)
 #define PIPE_WRITE (1)

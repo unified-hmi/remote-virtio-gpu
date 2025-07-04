@@ -15,67 +15,80 @@
  * limitations under the License.
  */
 
-#include <assert.h>
-#include <err.h>
-#include <errno.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
-#include <time.h>
+
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <errno.h>
+
+#include <err.h>
+
+#include <jansson.h>
 
 #include <rvgpu-generic/rvgpu-sanity.h>
-#include <rvgpu-generic/rvgpu-utils.h>
-#include <rvgpu-renderer/renderer/rvgpu-egl.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 #include <rvgpu-renderer/rvgpu-renderer.h>
-
-#include <linux/virtio_gpu.h>
+#include <rvgpu-renderer/renderer/rvgpu-egl.h>
+#include <rvgpu-renderer/backend/rvgpu-gbm.h>
+#include <rvgpu-renderer/backend/rvgpu-wayland.h>
+#include <rvgpu-renderer/compositor/rvgpu-compositor.h>
+#include <rvgpu-renderer/compositor/rvgpu-buffer-fd.h>
+#include <rvgpu-renderer/compositor/rvgpu-json-helpers.h>
+#include <rvgpu-renderer/compositor/rvgpu-connection.h>
 
 static void usage(void)
 {
 	static const char program_name[] = "rvgpu-renderer";
 
 	info("Usage: %s [options]\n", program_name);
-	info("\t-a\t\tenable translucent mode on Wayland\n");
 	info("\t-B color\tcolor of initial screen in RGBA format");
 	info("(0xRRGGBBAA, default is 0x%08x)\n", BACKEND_COLOR);
 	info("\t-c capset\tdump capset into file\n");
-	info("\t-s scanout\tdisplay specified scanout\n");
 	info("\t-b box\t\toverride scanout box (format WxH@X,Y)\n");
 	info("\t-i ID\t\tset scanout window ID (for IVI shell)\n");
 	info("\t-g card\t\tuse GBM mode on card (/dev/dri/cardN)\n");
+	info("\t-d domain\tset domain name for unix socket\n");
 	info("\t-S seat\t\tspecify seat for input in GBM mode\n");
-	info("\t-f\t\tRun in fullscreen mode\n");
+	info("\t-f output\tset output id for fullscreen mode on Wayland\n");
 	info("\t-p port\t\tport for listening (default: %u)\n",
 	     RVGPU_DEFAULT_PORT);
-	info("\t-v\t\tRun in vsync mode (eglSwapInterval 1)\n");
-	info("\t-F\t\tEnable measurement of FPS and frame time\n");
+	info("\t-V fps\t\tset vsync framerate (default: %u fps)\n",
+	     RVGPU_DEFAULT_VSYNC_FRAMERATE);
+	info("\t-F file\t\tdump FPS and frame time measurements into file\n");
+	info("\t-a\t\tenable translucent mode on Wayland\n");
+	info("\t-v\t\tRun in vsync mode (default: false)\n");
+	info("\t-l\t\tuse layout draw mode based on layout information\n");
+	info("\t-L\t\tenable layout sync mode\n");
 	info("\t-h\t\tShow this message\n");
-
-	info("\nNote:\n");
-	info("\tThe alpha component of 'B' option is ignored in the following cases:\n");
-	info("\t- 'a' option is not used.\n");
-	info("\t- 'g' option is used.\n");
-
-	info("\n\tSince 's' option specifies scanout of 'b' and 'i' options,\n");
-	info("\tsetting it before 'b' and 'i' options is mandatory,\n");
-	info("\te.g., rvgpu-renderer -s 0 -b 1920x1080@0,0 -i 9000 -p 55667.\n");
-
-	info("\n\t'-b' option is used to crop out an area from the application's drawing area at rvgpu-renderer side.\n");
-	info("\tIf omitted, an initial 100x100 surface will be created when connected from rvgpu-proxy.\n");
-	info("\tThis initial surface will be expanded to the full size of application's draw area later.\n");
-
-	info("\n\t'g' option is for using GBM mode, which scales to full screen according to 'b' option.\n");
-	info("\n\t'f' option scales to full screen according to 'b' option.\n");
-	info("\n\t'F' option dumps FPS to file set by RVGPU_FPS_DUMP_PATH; no output if unset.\n");
 }
 
-/* Signal handler to reap zombie processes */
+void signal_handler(int sig)
+{
+	static bool parent_exit = false;
+	pid_t pgid = getpgrp();
+	pid_t pid = getpid();
+	//printf("Process pgid: %d, pid: %d received signal %d\n", pgid, pid, sig);
+	if (sig == SIGTERM || sig == SIGINT || sig == SIGQUIT) {
+		if (pgid == pid) {
+			if (!parent_exit) {
+				kill(0, sig);
+				parent_exit = true;
+			} else {
+				exit(0);
+			}
+		} else {
+			exit(0);
+		}
+	}
+}
+
 static void wait_for_child(int sig)
 {
 	(void)sig;
@@ -83,18 +96,50 @@ static void wait_for_child(int sig)
 		;
 }
 
-static FILE *listen_conn(uint16_t port_nr, int *res_socket)
+void rvgpu_handle_connection(struct rvgpu_compositor_params *params)
 {
-	int sock, newsock = -1;
-	struct sigaction sa;
-	struct sockaddr_in server_addr = { 0 };
-	int reuseaddr = 1; /* True */
-	int fin_wait = 1; /* FIN wait timeout */
-	pid_t pid = 0;
+	platform_funcs_t pf_funcs = params->pf_funcs;
+	struct rvgpu_egl_params egl_params = params->egl_params;
+	struct rvgpu_fps_params fps_params = params->fps_params;
+	struct rvgpu_layout_params layout_params = params->layout_params;
+	bool vsync = params->vsync;
+	uint16_t port_no = params->port_no;
+	uint32_t max_vsync_rate = params->max_vsync_rate;
+	char *carddev = params->carddev;
+	char *domain_name = params->domain_name;
+	char *capset_file = params->capset_file;
 
+	char rvgpu_compositor_sock_path[256];
+	char rvgpu_layout_sock_path[256];
+	snprintf(rvgpu_compositor_sock_path, sizeof(rvgpu_compositor_sock_path),
+		 "%s.%s", UHMI_RVGPU_COMPOSITOR_SOCK, domain_name);
+	snprintf(rvgpu_layout_sock_path, sizeof(rvgpu_layout_sock_path),
+		 "%s.%s", UHMI_RVGPU_LAYOUT_SOCK, domain_name);
+
+	struct rvgpu_domain_sock_params domain_params = {
+		rvgpu_compositor_sock_path, rvgpu_layout_sock_path
+	};
+
+	if (access(rvgpu_compositor_sock_path, F_OK) == 0) {
+		fprintf(stderr, "Error: The domain is already in use (%s).\n",
+			rvgpu_compositor_sock_path);
+		exit(0);
+	}
+
+	if (access(rvgpu_layout_sock_path, F_OK) == 0) {
+		fprintf(stderr, "Error: The domain is already in use (%s).\n",
+			rvgpu_layout_sock_path);
+		exit(0);
+	}
+
+	int sock = -1;
+	struct sockaddr_in server_addr = { 0 };
+	int reuseaddr = 1;
+	int fin_wait = 1;
 	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == -1)
+	if (sock == -1) {
 		err(1, "socket");
+	}
 
 	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr,
 		       sizeof(int)) == -1) {
@@ -108,94 +153,167 @@ static FILE *listen_conn(uint16_t port_nr, int *res_socket)
 
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	server_addr.sin_port = htons(port_nr);
+	server_addr.sin_port = htons(port_no);
 
 	if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) ==
 	    -1) {
 		err(1, "bind");
 	}
 
-	if (listen(sock, BACKLOG) == -1)
+	if (listen(sock, BACKLOG) == -1) {
 		err(1, "listen");
+	}
 
-	sa.sa_handler = wait_for_child;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1)
-		err(1, "sigaction");
-
+	json_t *proxy_list = json_array();
+	int num_proxy = 0;
 	while (1) {
-		newsock = accept4(sock, NULL, NULL, SOCK_NONBLOCK);
+		int newsock = accept4(sock, NULL, NULL, SOCK_NONBLOCK);
 		if (newsock == -1)
 			err(1, "accept");
 
-		*res_socket = accept4(sock, NULL, NULL, SOCK_NONBLOCK);
-		if (*res_socket == -1)
+		int rsocket = accept4(sock, NULL, NULL, SOCK_NONBLOCK);
+		if (rsocket == -1)
 			err(1, "accept");
 
-		if (pid > 0) {
-			kill(pid, SIGTERM);
-			/*
-			 * sleep for 100 ms until all child resources
-			 * will be freed
-			 */
-			usleep(100 * 1000);
+		int result = 0;
+		struct pollfd fds;
+		fds.fd = newsock;
+		fds.events = POLLIN;
+		num_proxy++;
+		int max_id_length = 256;
+		char rvgpu_surface_id[max_id_length];
+		json_t *json_proxy_obj = NULL;
+		int ret = poll(&fds, 1, -1);
+		if (ret == -1) {
+			perror("rvgpu_compositor_run poll");
+			result = -1;
+		} else {
+			if (fds.revents & POLLIN) {
+				char *received_data = recv_str_all(newsock);
+				strncpy(rvgpu_surface_id, received_data,
+					max_id_length - 1);
+				rvgpu_surface_id[max_id_length - 1] = '\0';
+				free(received_data);
+				if (strcmp(rvgpu_surface_id, "no") == 0) {
+					snprintf(rvgpu_surface_id,
+						 sizeof(rvgpu_surface_id), "%d",
+						 num_proxy * 1000);
+				}
+				bool hasID = str_value_in_json_array_with_key(
+					proxy_list, "rvgpu_surface_id",
+					rvgpu_surface_id);
+				if (hasID) {
+					json_t *ext_json_proxy_obj =
+						get_jsonobj_with_str_key(
+							proxy_list,
+							"rvgpu_surface_id",
+							rvgpu_surface_id);
+					int render_pid;
+					get_int_from_jsonobj(ext_json_proxy_obj,
+							     "render_pid",
+							     &render_pid);
+					if (kill(render_pid, 0) == 0) {
+						printf("render_pid %d is alive\n",
+						       render_pid);
+					} else {
+						printf("render_pid %d is not alive\n",
+						       render_pid);
+						remove_jsonobj_with_int_key(
+							proxy_list,
+							"render_pid",
+							render_pid);
+						hasID = false;
+					}
+				}
+				if (!hasID) {
+					json_proxy_obj = json_object();
+					json_object_set_new(
+						json_proxy_obj,
+						"rvgpu_surface_id",
+						json_string(rvgpu_surface_id));
+				} else {
+					fprintf(stderr,
+						"has already used rvgpu_surface_id: %s\n",
+						rvgpu_surface_id);
+					result = -1;
+				}
+			}
 		}
 
-		pid = fork();
+		if (result == -1) {
+			close(newsock);
+			close(rsocket);
+			continue;
+		}
+
+		pid_t pid = fork();
 		switch (pid) {
-		case 0: /* In child process */
-		{
-			FILE *ret;
-
-			close(sock);
-			dup2(newsock, 0);
-			ret = fdopen(newsock, "w");
-			setvbuf(ret, NULL, _IOFBF, BUFSIZ);
-			return ret;
+		case 0: {
+			pid = getpid();
+			struct render_params *render_params =
+				(struct render_params *)calloc(
+					1, sizeof(struct render_params));
+			render_params->pf_funcs = pf_funcs;
+			render_params->command_socket = newsock;
+			render_params->resource_socket = rsocket;
+			render_params->max_vsync_rate = max_vsync_rate;
+			render_params->vsync = vsync;
+			render_params->rvgpu_surface_id = rvgpu_surface_id;
+			render_params->fps_params = fps_params;
+			render_params->carddev = carddev;
+			render_params->egl_params = egl_params;
+			render_params->layout_params = layout_params;
+			render_params->domain_params = domain_params;
+			render_params->capset_file = capset_file;
+			rvgpu_render(render_params);
+			close(render_params->command_socket);
+			close(render_params->resource_socket);
+			free(render_params);
+			printf("rvgpu_surface_id %s render process finished\n",
+			       rvgpu_surface_id);
+			_exit(0);
 		}
-		case -1: /* fork failed */
-			err(1, "fork");
-		default: /* Parent process */
-			if (newsock > 0)
-				close(newsock);
-			if (*res_socket > 0)
-				close(*res_socket);
+		default:
+			if (json_proxy_obj != NULL) {
+				json_object_set_new(json_proxy_obj,
+						    "render_pid",
+						    json_integer(pid));
+				json_array_append_new(
+					proxy_list,
+					json_deep_copy(json_proxy_obj));
+				json_decref(json_proxy_obj);
+			}
+			close(newsock);
+			close(rsocket);
 		}
 	}
-
 	close(sock);
-	return NULL;
 }
 
 int main(int argc, char **argv)
 {
-	struct rvgpu_pr_state *pr;
-	struct rvgpu_egl_state *egl;
-	struct rvgpu_scanout_params sp[VIRTIO_GPU_MAX_SCANOUTS], *cp = &sp[0];
-	struct rvgpu_pr_params pp = {
-		.sp = sp,
-		.nsp = VIRTIO_GPU_MAX_SCANOUTS,
-	};
 	struct rvgpu_egl_params egl_params = {
 		.clear_color = BACKEND_COLOR,
 	};
 	char *errstr = NULL;
-	const char *carddev = NULL;
-	const char *seat = "seat0";
-	int w, h, x, y, opt, res_socket = 0;
-	unsigned int res_id, scanout;
-	uint16_t port_nr = RVGPU_DEFAULT_PORT;
-	FILE *input_stream = stdout;
-	bool fullscreen = false, vsync = false, translucent = false,
-	     user_specified_scanouts = false;
+	char *carddev = NULL;
+	char *capset_file = NULL;
+	char *domain_name = NULL;
+	char *seat = "seat0";
+	int w, h, x, y, opt = 0;
+	uint16_t port_no = RVGPU_DEFAULT_PORT;
+	bool fullscreen = false, vsync = false, translucent = false;
 
+	uint32_t width = 800;
+	uint32_t height = 600;
+	uint32_t ivi_surface_id = 0;
+	uint32_t output_id = 0;
+	uint32_t max_vsync_rate = RVGPU_DEFAULT_VSYNC_FRAMERATE;
 	struct rvgpu_fps_params fps_params = { 0 };
+	struct rvgpu_layout_params layout_params = { 0 };
 
-	memset(sp, 0, sizeof(sp));
-	memset(&pp, 0, sizeof(pp));
-
-	while ((opt = getopt(argc, argv, "afhvFi:c:s:S:b:B:p:g:")) != -1) {
+	while ((opt = getopt(argc, argv, "ahvlLi:c:s:S:f:b:B:p:g:d:V:F:")) !=
+	       -1) {
 		switch (opt) {
 		case 'a':
 			translucent = true;
@@ -212,47 +330,22 @@ int main(int argc, char **argv)
 			break;
 
 		case 'c':
-			pp.capset = fopen(optarg, "w");
-			if (pp.capset == NULL)
-				err(1, "cannot open %s for writing", optarg);
-			break;
-		case 's':
-			scanout = (unsigned int)sanity_strtonum(
-				optarg, 0, VIRTIO_GPU_MAX_SCANOUTS - 1,
-				&errstr);
-			if (errstr != NULL) {
-				warnx("Scanout number should be in [%u..%u]\n",
-				      0, VIRTIO_GPU_MAX_SCANOUTS);
-				errx(1, "Invalid scanout %s:%s", optarg,
-				     errstr);
-			}
-			cp = &sp[scanout];
-			cp->enabled = true;
-			user_specified_scanouts = true;
+			capset_file = optarg;
 			break;
 		case 'b':
 			if (sscanf(optarg, "%dx%d@%d,%d", &w, &h, &x, &y) !=
 			    4) {
 				errx(1, "invalid scanout box %s", optarg);
 			} else {
-				if (w > 0 && h > 0 && x >= 0 && y >= 0) {
-					cp->box.w = (unsigned int)w;
-					cp->box.h = (unsigned int)h;
-					cp->box.x = (unsigned int)x;
-					cp->box.y = (unsigned int)y;
-				} else {
-					errx(1,
-					     "invalid scanout configuration %s, width and height "
-					     "values must be greater than zero, x y position must be "
-					     "greater or equal zero",
-					     optarg);
+				if (w > 0 && h > 0) {
+					width = (unsigned int)w;
+					height = (unsigned int)h;
 				}
 			}
-			cp->boxed = true;
 			break;
 		case 'i':
-			cp->id = (uint32_t)sanity_strtonum(optarg, 1,
-							   UINT32_MAX, &errstr);
+			ivi_surface_id = (uint32_t)sanity_strtonum(
+				optarg, 1, UINT32_MAX, &errstr);
 			if (errstr != NULL)
 				errx(1, "Invalid IVI id specified %s:%s",
 				     optarg, errstr);
@@ -265,9 +358,17 @@ int main(int argc, char **argv)
 			break;
 		case 'f':
 			fullscreen = true;
+			output_id = (uint32_t)sanity_strtonum(
+				optarg, 0, UINT32_MAX, &errstr);
+			if (errstr != NULL)
+				errx(1, "Invalid output id specified %s:%s",
+				     optarg, errstr);
+			break;
+		case 'd':
+			domain_name = optarg;
 			break;
 		case 'p':
-			port_nr = (uint16_t)sanity_strtonum(optarg,
+			port_no = (uint16_t)sanity_strtonum(optarg,
 							    MIN_PORT_NUMBER,
 							    MAX_PORT_NUMBER,
 							    &errstr);
@@ -278,11 +379,25 @@ int main(int argc, char **argv)
 				     errstr);
 			}
 			break;
+		case 'V':
+			max_vsync_rate = (uint32_t)sanity_strtonum(
+				optarg, 1, UINT32_MAX, &errstr);
+			if (errstr != NULL)
+				errx(1, "Invalid vsync rate specified %s:%s",
+				     optarg, errstr);
+			break;
 		case 'v':
 			vsync = true;
 			break;
 		case 'F':
+			fps_params.fps_dump_path = optarg;
 			fps_params.show_fps = true;
+			break;
+		case 'l':
+			layout_params.use_rvgpu_layout_draw = true;
+			break;
+		case 'L':
+			layout_params.use_layout_sync = true;
 			break;
 		case 'h':
 			usage();
@@ -293,55 +408,114 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (!user_specified_scanouts) {
-		sp[0].enabled = true;
-	}
+	setpgid(0, 0);
+	struct sigaction sa;
+	sa.sa_handler = signal_handler;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
 
-	input_stream = listen_conn(port_nr, &res_socket);
-	assert(input_stream);
+	struct sigaction sa_chld;
+	sa_chld.sa_handler = wait_for_child;
+	sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+	sigemptyset(&sa_chld.sa_mask);
+	sigaction(SIGCHLD, &sa_chld, NULL);
 
-	if (carddev == NULL)
-		egl = rvgpu_wl_init(fullscreen, translucent, input_stream);
-	else
-		egl = rvgpu_gbm_init(carddev, seat, input_stream);
+	platform_funcs_t pf_funcs = {
+		.rvgpu_egl_pf_init = NULL,
+		.rvgpu_egl_pf_free = NULL,
+		.rvgpu_create_pf_native_display = NULL,
+		.rvgpu_destroy_pf_native_display = NULL,
+		.rvgpu_pf_swap = NULL,
+		.send_buffer_handle = (SendBufferHandleFunc)send_handle,
+		.recv_buffer_handle = (RecvBufferHandleFunc)recv_handle,
+		.get_hardware_buffer_cap = (GetHardwareBufferCapFunc)
+			get_cap_dma_buf_import_extensions,
+		.create_hardware_buffer =
+			(CreateHardwareBufferFunc)create_dma_buffer_fd,
+		.create_shared_buffer = (CreateSharedBufferFunc)create_shm_fd,
+		.destroy_hardware_buffer =
+			(DestroyHardwareBufferFunc)destroy_dma_buffer_handle,
+		.destroy_shared_buffer =
+			(DestroySharedBufferFunc)destroy_shm_fd,
+		.create_egl_image =
+			(CreateEGLImageFunc)create_egl_image_from_dma
+	};
 
-	egl->params = &egl_params;
-	egl->fps_params = fps_params;
-
-	pr = rvgpu_pr_init(egl, &pp, res_socket);
-
-	for (unsigned int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
-		struct rvgpu_scanout *s = &egl->scanouts[i];
-
-		s->scanout_id = i;
-		s->params = sp[i];
-		if (sp[i].enabled) {
-			rvgpu_egl_create_scanout(egl, &egl->scanouts[i]);
-			rvgpu_egl_draw(egl, &egl->scanouts[i], false);
-		}
-	}
-
-	if (egl->fps_params.show_fps) {
-		rvgpu_init_fps_dump(&egl->fps_params.fps_dump_fp);
-		while (true) {
-			res_id = rvgpu_pr_dispatch(pr);
-			if (res_id <= 0) {
-				break;
-			}
-			rvgpu_egl_drawall(egl, res_id, vsync);
-		}
+	void *egl_pf_init_params = NULL;
+	rvgpu_wl_params *wl_params = NULL;
+	rvgpu_gbm_params *gbm_params = NULL;
+	if (carddev == NULL) {
+		rvgpu_wl_params *wl_params =
+			(rvgpu_wl_params *)calloc(1, sizeof(rvgpu_wl_params));
+		wl_params->fullscreen = fullscreen;
+		wl_params->output_id = output_id;
+		wl_params->translucent = translucent;
+		wl_params->ivi_surface_id = ivi_surface_id;
+		pf_funcs.rvgpu_egl_pf_init = (RVGPUEGLPFInitFunc)rvgpu_wl_init;
+		pf_funcs.rvgpu_egl_pf_free = (RVGPUEGLPFFreeFunc)rvgpu_wl_free;
+		pf_funcs.rvgpu_create_pf_native_display =
+			(RVGPUCreatePFNativeDisplayFunc)create_wl_native_display;
+		pf_funcs.rvgpu_destroy_pf_native_display =
+			(RVGPUDestroyPFNativeDisplayFunc)
+				destroy_wl_native_display;
+		pf_funcs.rvgpu_pf_swap = (RVGPUPFSwapFunc)rvgpu_wl_swap;
+		egl_pf_init_params = (void *)wl_params;
 	} else {
-		while ((res_id = rvgpu_pr_dispatch(pr))) {
-			rvgpu_egl_drawall(egl, res_id, vsync);
-		}
+		rvgpu_gbm_params *gbm_params =
+			(rvgpu_gbm_params *)calloc(1, sizeof(rvgpu_gbm_params));
+		gbm_params->device = carddev;
+		gbm_params->seat = seat;
+		pf_funcs.rvgpu_egl_pf_init = (RVGPUEGLPFInitFunc)rvgpu_gbm_init;
+		pf_funcs.rvgpu_egl_pf_free = (RVGPUEGLPFFreeFunc)rvgpu_gbm_free;
+		pf_funcs.rvgpu_create_pf_native_display =
+			(RVGPUCreatePFNativeDisplayFunc)
+				create_gbm_native_display;
+		pf_funcs.rvgpu_destroy_pf_native_display =
+			(RVGPUDestroyPFNativeDisplayFunc)
+				destroy_gbm_native_display;
+		pf_funcs.rvgpu_pf_swap = (RVGPUPFSwapFunc)rvgpu_gbm_swap;
+		egl_pf_init_params = (void *)gbm_params;
 	}
 
-	if (pp.capset)
-		fclose(pp.capset);
+	char pid_str[16];
+	if (domain_name == NULL) {
+		snprintf(pid_str, sizeof(pid_str), "%d", getpid());
+		domain_name = pid_str;
+	}
 
-	rvgpu_pr_free(pr);
-	rvgpu_egl_free(egl);
-	fclose(input_stream);
-
+	struct rvgpu_compositor_params params = {
+		.pf_funcs = pf_funcs,
+		.egl_pf_init_params = egl_pf_init_params,
+		.egl_params = egl_params,
+		.fps_params = fps_params,
+		.layout_params = layout_params,
+		.translucent = translucent,
+		.fullscreen = fullscreen,
+		.vsync = vsync,
+		.port_no = port_no,
+		.width = width,
+		.height = height,
+		.ivi_surface_id = ivi_surface_id,
+		.max_vsync_rate = max_vsync_rate,
+		.carddev = carddev,
+		.seat = seat,
+		.domain_name = domain_name,
+		.capset_file = capset_file
+	};
+	pid_t pid = fork();
+	switch (pid) {
+	case 0: {
+		rvgpu_handle_connection(&params);
+		_exit(0);
+	}
+	default:
+		printf("forked for rvgpu_handle_connection\n");
+	}
+	rvgpu_compositor_run(&params);
+	free(wl_params);
+	free(gbm_params);
 	return EXIT_SUCCESS;
 }

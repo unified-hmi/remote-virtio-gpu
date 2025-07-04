@@ -19,14 +19,15 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/un.h>
-#include <unistd.h>
+
+#include <pthread.h>
 
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu.h>

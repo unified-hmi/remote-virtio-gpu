@@ -22,6 +22,7 @@ add_executable(rvgpu-proxy
 	gpu/rvgpu-map-guest.c
 	gpu/rvgpu-vqueue.c
 	rvgpu-proxy.c
+	$<TARGET_OBJECTS:rvgpu-utils>
 	$<TARGET_OBJECTS:rvgpu-sanity>)
 target_include_directories(rvgpu-proxy PRIVATE
 	${PROJECT_SOURCE_DIR}/include

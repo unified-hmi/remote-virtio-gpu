@@ -19,12 +19,19 @@
 add_executable(rvgpu-renderer
 	backend/rvgpu-wayland.c
 	backend/rvgpu-gbm.c
+	backend/rvgpu-offscreen.c
 	renderer/rvgpu-egl.c
 	renderer/rvgpu-input.c
+	renderer/rvgpu-render2d.c
+	compositor/rvgpu-json-helpers.c
+	compositor/rvgpu-connection.c
+	compositor/rvgpu-compositor.c
+	compositor/rvgpu-buffer-fd.c
 	virgl/rvgpu-virgl.c
 	ivi/ivi-application-client-protocol.c
 	shell/xdg-shell-client-protocol.c
 	rvgpu-renderer.c
+	$<TARGET_OBJECTS:rvgpu-utils>
 	$<TARGET_OBJECTS:rvgpu-sanity>)
 target_include_directories(rvgpu-renderer
 	PRIVATE
@@ -33,5 +40,7 @@ target_include_directories(rvgpu-renderer
 	)
 target_compile_definitions(rvgpu-renderer PRIVATE _GNU_SOURCE)
 target_link_libraries(rvgpu-renderer
-	PRIVATE ${extlibs_LIBRARIES} udev drm pthread)
+	PRIVATE ${extlibs_LIBRARIES} udev drm pthread m rt jansson)
 install(TARGETS rvgpu-renderer RUNTIME DESTINATION bin)
+
+add_subdirectory(tests)

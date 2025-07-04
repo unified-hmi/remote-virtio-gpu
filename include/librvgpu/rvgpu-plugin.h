@@ -75,6 +75,8 @@ struct rvgpu_ctx_arguments {
 	uint16_t reconn_intv_ms;
 	/* Number of scanouts */
 	uint16_t scanout_num;
+	/* Rendering id for rvgpu compositor */
+	char *rvgpu_surface_id;
 };
 
 struct rvgpu_scanout;

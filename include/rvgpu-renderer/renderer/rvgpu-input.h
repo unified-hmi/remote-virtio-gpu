@@ -26,6 +26,18 @@
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <rvgpu-renderer/rvgpu-renderer.h>
 
+#define RVGPU_TOUCH_DOWN_EVENT_ID 0
+#define RVGPU_TOUCH_UP_EVENT_ID 1
+#define RVGPU_TOUCH_MOTION_EVENT_ID 2
+#define RVGPU_TOUCH_FRAME_EVENT_ID 3
+#define RVGPU_TOUCH_CANCEL_EVENT_ID 4
+#define RVGPU_POINTER_ENTER_EVENT_ID 5
+#define RVGPU_POINTER_LEAVE_EVENT_ID 6
+#define RVGPU_POINTER_MOTION_EVENT_ID 7
+#define RVGPU_POINTER_BUTTON_EVENT_ID 8
+#define RVGPU_POINTER_AXIS_EVENT_ID 9
+#define RVGPU_KEYBOARD_EVENT_ID 10
+
 struct rvgpu_input_state;
 
 /**
@@ -96,5 +108,21 @@ void rvgpu_in_remove_slot(struct rvgpu_input_state *in, int32_t id);
  */
 void rvgpu_in_move_slot(struct rvgpu_input_state *in, int32_t id, double x,
 			double y);
+
+void touch_down_cb(int32_t id, double x, double y, struct rvgpu_egl_state *egl);
+void touch_up_cb(int32_t id, struct rvgpu_egl_state *egl);
+void touch_motion_cb(int32_t id, double x, double y,
+		     struct rvgpu_egl_state *egl);
+void touch_frame_cb(struct rvgpu_egl_state *egl);
+void touch_cancel_cb(struct rvgpu_egl_state *egl);
+
+void pointer_inout_cb(double x, double y, struct rvgpu_egl_state *egl);
+void pointer_motion_cb(double x, double y, struct rvgpu_egl_state *egl);
+void pointer_button_cb(uint32_t button, uint32_t state,
+		       struct rvgpu_egl_state *egl);
+void pointer_axis_cb(uint32_t axis, uint32_t value,
+		     struct rvgpu_egl_state *egl);
+
+void keyboard_cb(uint32_t key, uint32_t state, struct rvgpu_egl_state *egl);
 
 #endif /* RVGPU_INPUT_H */

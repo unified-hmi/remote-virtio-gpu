@@ -19,15 +19,16 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/input.h>
-#include <linux/uinput.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <unistd.h>
+#include <sys/poll.h>
+
+#include <linux/input.h>
+#include <linux/uinput.h>
 
 #include <rvgpu-generic/rvgpu-sanity.h>
-#include <rvgpu-generic/rvgpu-utils.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
 #include <rvgpu-proxy/gpu/rvgpu-input-device.h>
