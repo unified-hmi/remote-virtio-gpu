@@ -1,0 +1,36 @@
+{
+  "command": "initial_vscreen",
+  "vlayer": [
+    {
+      "appli_name": "glmark2-es2-wayland",
+      "VID": 910000,
+      "coord": "global",
+      "virtual_w": 1920,
+      "virtual_h": 1080,
+      "vsrc_x": 0,
+      "vsrc_y": 0,
+      "vsrc_w": 1920,
+      "vsrc_h": 1080,
+      "vdst_x": 0,
+      "vdst_y": 0,
+      "vdst_w": 1920,
+      "vdst_h": 1080,
+      "vsurface": [
+        {
+          "appli_name": "glmark2-es2-wayland",
+          "VID": 5100,
+          "pixel_w": 1920,
+          "pixel_h": 1080,
+          "psrc_x": 0,
+          "psrc_y": 0,
+          "psrc_w": 1920,
+          "psrc_h": 1080,
+          "vdst_x": 0,
+          "vdst_y": 0,
+          "vdst_w": 1920,
+          "vdst_h": 1080
+        }
+      ]
+    }
+  ]
+}
