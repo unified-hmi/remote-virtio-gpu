@@ -1,0 +1,29 @@
+{
+    "virtual_screen_2d": {
+        "size": {"virtual_w": 3840, "virtual_h": 2160},
+        "virtual_displays": [
+            {"vdisplay_id": 0, "disp_name": "SCREEN0", "virtual_x": 0, "virtual_y": 0, "virtual_w": 1920, "virtual_h": 1080},
+            {"vdisplay_id": 1, "disp_name": "SCREEN1", "virtual_x": 1920, "virtual_y": 0, "virtual_w": 1920, "virtual_h": 1080}
+        ]
+    },
+    "real_displays": [
+        {"node_id": 0, "vdisplay_id": 0, "pixel_w": 1920, "pixel_h": 1080, "rdisplay_id": 0},
+        {"node_id": 1, "vdisplay_id": 1, "pixel_w": 1920, "pixel_h": 1080, "rdisplay_id": 0}
+    ],
+    "node": [
+        {"node_id": 0, "hostname": "host1", "ip": "192.168.0.100"},
+        {"node_id": 1, "hostname": "host2", "ip": "192.168.0.101"}
+    ],
+    "distributed_window_system": {
+        "window_manager": {},
+	"ucl_lifecycle_manager" : {"node_id" : 0, "port": 6543},
+        "framework_node": [
+            {"node_id": 0,"ula": {"debug": false, "debug_port": 8080, "port": 10100},"ucl_node": {"port": 7654},
+             "compositor": [{"vdisplay_ids": [0], "sock_domain_name": "rvgpu-compositor-0", "listen_port": 36000}]
+	    },
+            {"node_id": 1,"ula": {"debug": false, "debug_port": 8080, "port": 10100},"ucl_node": {"port": 7654},
+             "compositor": [{"vdisplay_ids": [1], "sock_domain_name": "rvgpu-compositor-1", "listen_port": 36001}]
+	    }
+        ]
+    }
+}
