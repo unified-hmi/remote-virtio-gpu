@@ -1,1 +1,2 @@
 SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="/devices/virtio-lo-bus/*", TAG+="seat", TAG+="master-of-seat", ENV{ID_SEAT}="seat_virtual", PROGRAM="/bin/bash -c '[ -f /tmp/rvgpu-index ] && cat /tmp/rvgpu-index || echo \"\"'", SYMLINK+="dri/rvgpu_virtio%c"
+SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="/devices/virtio-lo-bus/*", ACTION=="add", RUN+="/usr/bin/setfacl -m g:video:rw,m::rw %E{DEVNAME}"
