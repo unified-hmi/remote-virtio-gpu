@@ -622,6 +622,78 @@ static void *resource_thread_func(void *param)
 	return NULL;
 }
 
+
+int get_virtio_suffix_hex(const char *devpath, unsigned int *out_value) {
+	char prefix[16];
+	snprintf(prefix, sizeof(prefix), "virtio-lo-%04x", VIRTIO_ID_GPU & 0xFFFF);
+
+	const char *ptr = strstr(devpath, prefix);
+	if (ptr == NULL) {
+		return -1;
+	}
+
+	ptr += strlen(prefix);
+	unsigned int value = 0;
+	int consumed = 0;
+	if (sscanf(ptr, "%4x%n", &value, &consumed) != 1) {
+		return -1;
+	}
+	if (consumed != 4) {
+		return -1;
+	}
+
+	*out_value = value;
+	return 0;
+}
+
+int next_drm_card_mex(void) {
+
+	int idx = 0;
+	int card_mex = 0;
+	struct udev *udev = udev_new();
+	if (udev == NULL) {
+		fprintf(stderr, "%s(%d)\n", __FILE__, __LINE__);
+		return 0;
+	}
+	size_t buf_len = (size_t)snprintf(NULL, 0, "card%d", INT_MAX) + 1;
+	char *sysname = (char *)malloc(buf_len);
+	if (sysname == NULL) {
+		udev_unref(udev);
+		return 0;
+	}
+
+	while (1) {
+		snprintf(sysname, buf_len, "card%d", idx);
+		struct udev_device *dev =
+			udev_device_new_from_subsystem_sysname(udev, "drm", sysname);
+		if (dev == NULL) {
+			break;
+		}
+		const char *seat =
+			udev_device_get_property_value(dev, "ID_SEAT");
+		if (seat && strcmp(seat, "seat_virtual") == 0) {
+			const char *devpath =
+				udev_device_get_property_value(dev, "DEVPATH");
+			unsigned int value;
+			int ret = get_virtio_suffix_hex(devpath, &value);
+			if (ret < 0) {
+				udev_device_unref(dev);
+				break;
+			}
+			card_mex = value - PCI_VENDOR_ID_REDHAT_QUMRANET + 1;
+		}
+		idx++;
+		udev_device_unref(dev);
+	}
+
+	free(sysname);
+	udev_unref(udev);
+
+	return card_mex;
+}
+
+
+
 int find_virtual_drm_card_devices()
 {
 	int card_num = 0;
@@ -675,7 +747,7 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 	struct virtio_lo_qinfo q[2];
 	unsigned int i;
 
-	int virtual_card_num = find_virtual_drm_card_devices();
+	int virtual_card_num = next_drm_card_mex();
 	struct virtio_lo_devinfo info = {
 		.nqueues = 2u,
 		.qinfo = q,
