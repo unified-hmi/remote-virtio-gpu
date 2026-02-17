@@ -1,2 +1,5 @@
-SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="/devices/virtio-lo-bus/*", TAG+="seat", TAG+="master-of-seat", ENV{ID_SEAT}="seat_virtual", PROGRAM="/bin/bash -c '[ -f /tmp/rvgpu-index ] && cat /tmp/rvgpu-index || echo \"\"'", SYMLINK+="dri/rvgpu_virtio%c"
+# Virtio GPU - prevent desktop session access to avoid D-state on exit
+SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="*virtio-lo-bus*", TAG-="seat", TAG-="master-of-seat", TAG-="uaccess", MODE="0660", GROUP="video", ENV{ID_SEAT}="seat_virtual", PROGRAM="/bin/bash -c '[ -f /tmp/rvgpu-index ] && cat /tmp/rvgpu-index || echo \"\"'", SYMLINK+="dri/rvgpu_virtio%c"
 SUBSYSTEM=="drm", KERNEL=="card*", DEVPATH=="/devices/virtio-lo-bus/*", ACTION=="add", RUN+="/usr/bin/setfacl -m g:video:rw,m::rw %E{DEVNAME}"
+SUBSYSTEM=="drm", KERNEL=="renderD*", DEVPATH=="*virtio-lo-bus*", TAG-="seat", TAG-="uaccess", MODE="0660", GROUP="render", ENV{ID_SEAT}="seat_virtual"
+SUBSYSTEM=="drm", KERNEL=="renderD*", DEVPATH=="/devices/virtio-lo-bus/*", ACTION=="add", RUN+="/usr/bin/setfacl -m g:render:rw,m::rw %E{DEVNAME}"
