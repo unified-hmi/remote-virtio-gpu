@@ -324,4 +324,18 @@ void rvgpu_ctx_destroy(struct rvgpu_ctx *ctx)
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
 
 	ctx_priv->interrupted = true;
+
+	/* Wait for TCP thread to finish */
+	if (ctx_priv->tid) {
+		/*
+		 * Cancel the thread to interrupt poll() which blocks
+		 * indefinitely. The thread checks ctx_priv->interrupted
+		 * but poll(-1) doesn't return until an event occurs,
+		 * so we need to forcibly cancel it.
+		 */
+		pthread_cancel(ctx_priv->tid);
+		pthread_join(ctx_priv->tid, NULL);
+	}
+
+	/* Note: ctx_priv is freed by the caller (destroy_backend_rvgpu) */
 }

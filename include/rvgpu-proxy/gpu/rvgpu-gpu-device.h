@@ -103,4 +103,21 @@ void gpu_device_serve(struct gpu_device *g);
  */
 void gpu_device_free(struct gpu_device *g);
 
+/**
+ * @brief Flush pending requests with error response before shutdown
+ * @param g - pointer to gpu device structure
+ *
+ * This function drains all pending virtqueue requests by sending
+ * VIRTIO_GPU_RESP_ERR_DEVICE_RESET responses. This ensures the kernel
+ * virtio-gpu driver can free its vbufs before device removal.
+ */
+void gpu_device_flush_pending(struct gpu_device *g);
+
+/**
+ * @brief Get the vendor_id of the gpu device
+ * @param g - pointer to gpu device structure
+ * @return vendor_id used for the virtio-lo device
+ */
+uint32_t gpu_device_get_vendor_id(struct gpu_device *g);
+
 #endif /* RVGPU_GPU_DEVICE_H */

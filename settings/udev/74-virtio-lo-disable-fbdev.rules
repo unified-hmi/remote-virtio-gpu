@@ -1,0 +1,3 @@
+# Disable fbdev emulation for virtio-gpu on virtio-lo-bus
+# to prevent memory leaks when rvgpu-proxy exits
+ACTION=="add", SUBSYSTEM=="module", KERNEL=="virtio_lo", RUN+="/bin/sh -c 'echo 0 > /sys/module/drm_kms_helper/parameters/fbdev_emulation 2>/dev/null || true'"

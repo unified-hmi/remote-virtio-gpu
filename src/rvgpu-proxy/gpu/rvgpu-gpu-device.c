@@ -49,10 +49,10 @@
 #include <rvgpu-generic/rvgpu-capset.h>
 #include <rvgpu-generic/rvgpu-sanity.h>
 #include <rvgpu-proxy/gpu/rvgpu-gpu-device.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
 #include <rvgpu-proxy/gpu/rvgpu-map-guest.h>
 #include <rvgpu-proxy/gpu/rvgpu-vqueue.h>
-#include <rvgpu-utils/rvgpu-utils.h>
 
 #define GPU_MAX_CAPDATA 16
 
@@ -153,7 +153,7 @@ struct gpu_device {
 	int wait_vsync;
 #endif
 
-
+	uint32_t vendor_id;
 	size_t max_mem;
 	size_t curr_mem;
 	const struct gpu_device_params *params;
@@ -167,6 +167,7 @@ struct gpu_device {
 
 	struct virtio_gpu_config config;
 	pthread_t resource_thread;
+	volatile bool resource_thread_shutdown;
 
 	struct vqueue vq[2];
 	struct rvgpu_backend *backend;
@@ -313,6 +314,13 @@ void destroy_backend_rvgpu(struct rvgpu_backend *b)
 		s->plugin_v1.ops.rvgpu_destroy(ctx, s);
 	}
 	b->plugin_v1.ops.rvgpu_ctx_destroy(ctx);
+
+	/* Free ctx_priv after rvgpu_ctx_destroy (thread has finished) */
+	if (ctx->priv) {
+		free(ctx->priv);
+		ctx->priv = NULL;
+	}
+
 	dlclose(b->lib_handle);
 }
 
@@ -419,7 +427,7 @@ static struct async_resp *init_async_resp(void)
  * @param b - pointer to RVGPU backend
  * @param revents - events received on poll
  */
-int wait_resource_events(struct rvgpu_backend *b, short int *revents)
+int wait_resource_events(struct rvgpu_backend *b, short int *revents, int timeo)
 {
 	short int events[b->plugin_v1.ctx.scanout_num];
 
@@ -427,7 +435,7 @@ int wait_resource_events(struct rvgpu_backend *b, short int *revents)
 	memset(events, POLLIN,
 	       sizeof(short int) * b->plugin_v1.ctx.scanout_num);
 
-	return b->plugin_v1.ops.rvgpu_ctx_poll(&b->plugin_v1.ctx, RESOURCE, -1,
+	return b->plugin_v1.ops.rvgpu_ctx_poll(&b->plugin_v1.ctx, RESOURCE, timeo,
 					       events, revents);
 }
 
@@ -592,8 +600,18 @@ static void *resource_thread_func(void *param)
 		recv_fence_flags[i] = 0;
 	}
 
-	while (1) {
-		wait_resource_events(b, revents);
+	while (!g->resource_thread_shutdown) {
+		/*
+		 * 100ms timeout: Short enough for responsive shutdown detection,
+		 * while waiting for fence events from renderer.
+		 */
+		int ret = wait_resource_events(b, revents, 100);
+		if (g->resource_thread_shutdown)
+			break;
+		if (ret == 0)
+			continue;
+		if (ret < 0)
+			break;
 		for (int i = 0; i < b->plugin_v1.ctx.scanout_num; i++) {
 			if (revents[i] & POLLIN) {
 				struct rvgpu_scanout *s =
@@ -802,6 +820,7 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 		err(1, "add virtio-lo-device");
 
 	g->idx = info.idx;
+	g->vendor_id = info.vendor_id;
 
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
@@ -850,6 +869,7 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 
 	g->backend = b;
 
+	g->resource_thread_shutdown = false;
 	if (pthread_create(&g->resource_thread, NULL, resource_thread_func,
 			   g) != 0) {
 		err(1, "resource thread create");
@@ -857,9 +877,191 @@ struct gpu_device *gpu_device_init(int lo_fd, int efd, int capset,
 	return g;
 }
 
+void gpu_device_flush_pending(struct gpu_device *g)
+{
+	unsigned int i;
+	int total_flushed = 0;
+	int pass = 0;
+	int flushed_this_pass;
+	const int max_passes = 5;
+	/*
+	 * 50ms wait between passes: Allows pending async responses to arrive
+	 * during shutdown drain. Multiple passes with delays ensure graceful
+	 * cleanup without losing in-flight responses.
+	 */
+	const int wait_between_passes_us = 50000;
+	struct async_resp *r = g->async_resp;
+	struct cmd *cmd;
+
+	/*
+	 * Stop resource thread first to prevent it from writing to
+	 * async_resp while we're draining it.
+	 */
+	g->resource_thread_shutdown = true;
+	if (g->resource_thread) {
+		pthread_join(g->resource_thread, NULL);
+		g->resource_thread = 0;
+	}
+
+	/*
+	 * Loop multiple times to catch new requests that may arrive
+	 * while the kernel is cleaning up DRM resources after userspace
+	 * processes terminate.
+	 */
+	do {
+		int kick_ctrl = 0, kick_cursor = 0;
+		flushed_this_pass = 0;
+		pass++;
+
+		/* Flush async commands (fence-waiting requests) */
+		while ((cmd = TAILQ_FIRST(&r->async_cmds)) != NULL) {
+			struct virtio_gpu_ctrl_hdr resp = {
+				.type = VIRTIO_GPU_RESP_OK_NODATA,
+				.flags = cmd->hdr.flags,
+				.fence_id = cmd->hdr.fence_id,
+				.ctx_id = cmd->hdr.ctx_id,
+			};
+			vqueue_send_response(cmd->req, &resp, sizeof(resp));
+			TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
+			free(cmd);
+			kick_ctrl++;
+			flushed_this_pass++;
+		}
+
+		/* Drain pending requests from both virtqueues (ctrl and cursor) */
+		for (i = 0; i < 2; i++) {
+			struct vqueue *q = &g->vq[i];
+
+			while (vqueue_are_requests_available(q)) {
+				struct vqueue_request *req;
+				struct virtio_gpu_ctrl_hdr resp = {
+					.type = VIRTIO_GPU_RESP_OK_NODATA,
+					.flags = 0,
+					.fence_id = 0,
+					.ctx_id = 0,
+				};
+
+				req = vqueue_get_request(g->lo_fd, q);
+				if (!req)
+					break;
+
+				vqueue_send_response(req, &resp, sizeof(resp));
+				flushed_this_pass++;
+
+				if (i == 0)
+					kick_ctrl++;
+				else
+					kick_cursor++;
+			}
+		}
+
+		total_flushed += flushed_this_pass;
+
+		/* Notify the kernel driver about completed requests */
+		if (kick_ctrl) {
+			struct virtio_lo_kick k = { .idx = g->idx, .qidx = 0 };
+			ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+		}
+		if (kick_cursor) {
+			struct virtio_lo_kick k = { .idx = g->idx, .qidx = 1 };
+			ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+		}
+
+		if (flushed_this_pass > 0) {
+			/* Wait for kernel to process and possibly send more commands */
+			usleep(wait_between_passes_us);
+		}
+
+	} while (pass < max_passes && flushed_this_pass > 0);
+
+	if (total_flushed > 0) {
+		warnx("Flushed %d pending virtqueue requests", total_flushed);
+	}
+
+	/*
+	 * Wait for kernel to process responses. Instead of a fixed sleep,
+	 * poll until no new requests arrive for a stable period.
+	 * This ensures all pending operations are complete.
+	 */
+	{
+		const int stable_checks = 3;
+		const useconds_t check_interval_us = 10000; /* 10ms */
+		int stable_count = 0;
+
+		while (stable_count < stable_checks) {
+			bool has_pending = false;
+
+			/* Check if any new requests arrived */
+			for (i = 0; i < 2; i++) {
+				if (vqueue_are_requests_available(&g->vq[i]))
+					has_pending = true;
+			}
+
+			/* Also check async_cmds */
+			if (!TAILQ_EMPTY(&r->async_cmds))
+				has_pending = true;
+
+			if (has_pending) {
+				/* New requests arrived, reset and flush them */
+				stable_count = 0;
+				struct virtio_gpu_ctrl_hdr resp = {
+					.type = VIRTIO_GPU_RESP_OK_NODATA,
+				};
+
+				while ((cmd = TAILQ_FIRST(&r->async_cmds)) != NULL) {
+					resp.flags = cmd->hdr.flags;
+					resp.fence_id = cmd->hdr.fence_id;
+					resp.ctx_id = cmd->hdr.ctx_id;
+					vqueue_send_response(cmd->req, &resp,
+							     sizeof(resp));
+					TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
+					free(cmd);
+				}
+
+				for (i = 0; i < 2; i++) {
+					struct vqueue *q = &g->vq[i];
+
+					while (vqueue_are_requests_available(q)) {
+						struct vqueue_request *req =
+							vqueue_get_request(g->lo_fd,
+									   q);
+						if (!req)
+							break;
+
+						vqueue_send_response(req, &resp,
+								     sizeof(resp));
+					}
+				}
+
+				/* Notify kernel */
+				struct virtio_lo_kick k = {
+					.idx = g->idx, .qidx = 0
+				};
+				ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+				k.qidx = 1;
+				ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+			} else {
+				stable_count++;
+			}
+
+			usleep(check_interval_us);
+		}
+	}
+}
+
 void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
+
+	/*
+	 * Ensure resource thread is stopped.
+	 * Normally already stopped by gpu_device_flush_pending(),
+	 * but kept here for safety if free() is called directly.
+	 */
+	if (g->resource_thread) {
+		g->resource_thread_shutdown = true;
+		pthread_join(g->resource_thread, NULL);
+	}
 
 	for (i = 0u; i < 2u; i++) {
 		struct vring *vr = &g->vq[i].vr;
@@ -874,11 +1076,18 @@ void gpu_device_free(struct gpu_device *g)
 #endif
 	close(g->config_fd);
 	close(g->kick_fd);
+
 	if (g->backend)
 		destroy_backend_rvgpu(g->backend);
+
 	destroy_async_resp(g);
 
 	free(g);
+}
+
+uint32_t gpu_device_get_vendor_id(struct gpu_device *g)
+{
+	return g->vendor_id;
 }
 
 void gpu_device_config(struct gpu_device *g)

@@ -16,16 +16,21 @@
  */
 
 #include <assert.h>
+#include <dirent.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libudev.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu-protocol.h>
@@ -36,6 +41,264 @@
 
 #include <rvgpu-generic/rvgpu-sanity.h>
 #include <rvgpu-utils/rvgpu-utils.h>
+
+/* Global flag for graceful shutdown - set by signal handler */
+static volatile sig_atomic_t g_shutdown_requested;
+
+/* Signal handler - only sets the flag, nothing else */
+static void shutdown_signal_handler(int sig)
+{
+	(void)sig;
+	g_shutdown_requested = 1;
+}
+
+/**
+ * @brief Find PIDs of processes using the specified device and store them
+ * @param target_stat - stat of the target device
+ * @param my_pid - our own pid to exclude
+ * @param pids - array to store PIDs (caller must provide)
+ * @param max_pids - maximum number of PIDs to store
+ * @return number of processes found
+ */
+static int find_dri_user_pids(const struct stat *target_stat, pid_t my_pid,
+			     pid_t *pids, int max_pids)
+{
+	int count = 0;
+	DIR *proc_dir = opendir("/proc");
+
+	if (!proc_dir)
+		return 0;
+
+	struct dirent *proc_entry;
+
+	while ((proc_entry = readdir(proc_dir)) != NULL && count < max_pids) {
+		pid_t pid = (pid_t)atoi(proc_entry->d_name);
+
+		if (pid <= 0 || pid == my_pid)
+			continue;
+
+		char fd_dir_path[64];
+
+		snprintf(fd_dir_path, sizeof(fd_dir_path), "/proc/%d/fd",
+			 pid);
+
+		DIR *fd_dir = opendir(fd_dir_path);
+
+		if (!fd_dir)
+			continue;
+
+		struct dirent *fd_entry;
+
+		while ((fd_entry = readdir(fd_dir)) != NULL) {
+			char fd_path[128];
+			struct stat fd_stat;
+
+			snprintf(fd_path, sizeof(fd_path), "%s/%s",
+				 fd_dir_path, fd_entry->d_name);
+			if (stat(fd_path, &fd_stat) == 0 &&
+			    fd_stat.st_dev == target_stat->st_dev &&
+			    fd_stat.st_ino == target_stat->st_ino) {
+				pids[count++] = pid;
+				break;
+			}
+		}
+		closedir(fd_dir);
+	}
+	closedir(proc_dir);
+	return count;
+}
+
+/**
+ * @brief Check if a process is still running
+ * @param pid - process ID to check
+ * @return true if process exists, false otherwise
+ */
+static bool process_exists(pid_t pid)
+{
+	return kill(pid, 0) == 0 || errno == EPERM;
+}
+
+/**
+ * @brief Wait for a list of processes to terminate
+ * @param pids - array of PIDs
+ * @param count - number of PIDs
+ * @param timeout_ms - maximum time to wait in milliseconds
+ * @return number of processes still running after timeout
+ */
+static int wait_for_processes(pid_t *pids, int count, int timeout_ms)
+{
+	const int poll_interval_ms = 50;
+	int elapsed = 0;
+
+	while (elapsed < timeout_ms) {
+		int still_running = 0;
+
+		for (int i = 0; i < count; i++) {
+			if (pids[i] > 0 && process_exists(pids[i]))
+				still_running++;
+		}
+		if (still_running == 0)
+			return 0;
+
+		usleep(poll_interval_ms * 1000);
+		elapsed += poll_interval_ms;
+	}
+
+	/* Count remaining processes */
+	int remaining = 0;
+
+	for (int i = 0; i < count; i++) {
+		if (pids[i] > 0 && process_exists(pids[i]))
+			remaining++;
+	}
+	return remaining;
+}
+
+/**
+ * @brief Find DRM card device node by vendor_id and terminate processes using it
+ * @param vendor_id - the vendor_id used when creating the virtio-lo device
+ */
+static void terminate_dri_users(uint32_t vendor_id)
+{
+	struct udev *udev;
+	struct udev_enumerate *enumerate;
+	struct udev_list_entry *devices, *dev_list_entry;
+	const char *target_devnode = NULL;
+	struct stat target_stat;
+	char vendor_str[16];
+	pid_t my_pid = getpid();
+	pid_t pids[64];
+	int count, remaining;
+	const int sigterm_timeout_ms = 2000;
+	const int sigkill_timeout_ms = 500;
+
+	snprintf(vendor_str, sizeof(vendor_str), "0x%04x", vendor_id);
+
+	udev = udev_new();
+	if (!udev)
+		return;
+
+	enumerate = udev_enumerate_new(udev);
+	if (!enumerate) {
+		udev_unref(udev);
+		return;
+	}
+
+	udev_enumerate_add_match_subsystem(enumerate, "drm");
+	udev_enumerate_scan_devices(enumerate);
+	devices = udev_enumerate_get_list_entry(enumerate);
+
+	/* Find the DRM card with matching vendor_id */
+	udev_list_entry_foreach(dev_list_entry, devices) {
+		const char *path =
+			udev_list_entry_get_name(dev_list_entry);
+		struct udev_device *dev =
+			udev_device_new_from_syspath(udev, path);
+
+		if (!dev)
+			continue;
+
+		const char *devnode = udev_device_get_devnode(dev);
+
+		if (devnode && strstr(devnode, "/dev/dri/card")) {
+			struct udev_device *parent =
+				udev_device_get_parent(dev);
+
+			if (parent) {
+				const char *vid =
+					udev_device_get_sysattr_value(
+						parent, "vendor");
+				if (vid &&
+				    strcmp(vid, vendor_str) == 0) {
+					target_devnode = strdup(devnode);
+					udev_device_unref(dev);
+					break;
+				}
+			}
+		}
+		udev_device_unref(dev);
+	}
+
+	udev_enumerate_unref(enumerate);
+	udev_unref(udev);
+
+	if (!target_devnode) {
+		warnx("DRI device with vendor_id %s not found", vendor_str);
+		return;
+	}
+
+	warnx("Found DRI device: %s (vendor_id=%s)", target_devnode,
+	      vendor_str);
+
+	if (stat(target_devnode, &target_stat) < 0) {
+		free((void *)target_devnode);
+		return;
+	}
+
+	/* Find processes using the device */
+	count = find_dri_user_pids(&target_stat, my_pid, pids, 64);
+	if (count == 0) {
+		warnx("No processes using %s", target_devnode);
+		free((void *)target_devnode);
+		return;
+	}
+
+	warnx("Found %d process(es) using %s, sending SIGTERM...", count,
+	      target_devnode);
+
+	/* Send SIGTERM to all processes */
+	for (int i = 0; i < count; i++) {
+		warnx("  Sending SIGTERM to PID %d", pids[i]);
+		kill(pids[i], SIGTERM);
+	}
+
+	/* Wait for processes to terminate */
+	remaining = wait_for_processes(pids, count, sigterm_timeout_ms);
+	if (remaining == 0) {
+		warnx("All DRI users terminated gracefully");
+		goto wait_kernel_cleanup;
+	}
+
+	/* Still have users after timeout, send SIGKILL */
+	warnx("Timeout: %d process(es) still running, sending SIGKILL...",
+	      remaining);
+	for (int i = 0; i < count; i++) {
+		if (pids[i] > 0 && process_exists(pids[i])) {
+			warnx("  Sending SIGKILL to PID %d", pids[i]);
+			kill(pids[i], SIGKILL);
+		}
+	}
+
+	/* Wait for SIGKILL to take effect */
+	remaining = wait_for_processes(pids, count, sigkill_timeout_ms);
+	if (remaining > 0) {
+		warnx("Warning: %d process(es) still running after SIGKILL",
+		      remaining);
+	} else {
+		warnx("All DRI users terminated after SIGKILL");
+	}
+
+wait_kernel_cleanup:
+	/*
+	 * Wait for kernel to release DRM resources (GEM objects, etc.)
+	 * Even after userspace processes terminate, the kernel needs time
+	 * to clean up virtio-gpu-vbufs and other internal resources.
+	 *
+	 * Open the DRM device briefly to trigger any pending cleanup.
+	 */
+	{
+		int drm_fd = open(target_devnode, O_RDWR | O_CLOEXEC);
+
+		if (drm_fd >= 0) {
+			/* Opening and closing DRM device triggers cleanup */
+			fsync(drm_fd);
+			close(drm_fd);
+			warnx("Triggered DRM device cleanup via open/close");
+		}
+	}
+
+	free((void *)target_devnode);
+}
 
 static void usage(void)
 {
@@ -242,12 +505,33 @@ int main(int argc, char **argv)
 		err(1, "input thread create");
 	}
 
+	/* Setup signal handlers for graceful shutdown */
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = shutdown_signal_handler;
+	sa.sa_flags = 0; /* Do not use SA_RESTART so epoll_wait gets interrupted */
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGTERM, &sa, NULL) < 0)
+		warn("Failed to set SIGTERM handler");
+	if (sigaction(SIGINT, &sa, NULL) < 0)
+		warn("Failed to set SIGINT handler");
+
 	/* do the main_cycle */
-	for (;;) {
+	while (!g_shutdown_requested) {
 		int i, n;
 		struct epoll_event events[8];
 
-		n = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
+		/* Use timeout to periodically check shutdown flag */
+		n = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), 500);
+		if (n < 0) {
+			if (errno == EINTR) {
+				/* Interrupted by signal, check shutdown flag */
+				continue;
+			}
+			warn("epoll_wait error");
+			break;
+		}
 
 		for (i = 0; i < n; i++) {
 			switch (events[i].data.u32) {
@@ -258,12 +542,36 @@ int main(int argc, char **argv)
 				gpu_device_serve(dev);
 				break;
 			default:
-				errx(1, "Uknown event!");
+				warnx("Unknown event: %u",
+				      events[i].data.u32);
+				break;
 			}
 		}
 	}
 
+	warnx("Shutdown requested, cleaning up...");
+
+	/* Terminate processes using our DRI device before freeing it */
+	terminate_dri_users(gpu_device_get_vendor_id(dev));
+
+	/*
+	 * Flush pending virtqueue requests with error responses.
+	 * This allows the kernel virtio-gpu driver to free its vbufs
+	 * before we close the virtio-lo device.
+	 */
+	gpu_device_flush_pending(dev);
+
+	/*
+	 * Stop input thread BEFORE gpu_device_free().
+	 * input_thread uses librvgpu.so code, so it must be stopped
+	 * before dlclose() is called in gpu_device_free().
+	 */
+	pthread_cancel(input_thread);
+	pthread_join(input_thread, NULL);
+
+	/* Now safe to free gpu device (includes dlclose) */
 	gpu_device_free(dev);
+
 	input_device_free(inpdev);
 
 	close(epoll_fd);
