@@ -25,8 +25,6 @@
 #define MAX_MODIFIERS 32
 #define ALIGN(value, alignment) (((value) + ((alignment)-1)) & ~((alignment)-1))
 
-void send_handle(int client_fd, void *handle);
-void *recv_handle(int client_fd);
 bool get_cap_dma_buf_import_extensions(EGLDisplay dpy);
 void *create_shm_fd(const char *shm_name, int width, int height);
 void *create_dma_buffer_fd(uint32_t width, uint32_t height);

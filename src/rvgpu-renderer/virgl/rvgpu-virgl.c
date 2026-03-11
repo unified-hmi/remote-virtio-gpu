@@ -220,6 +220,8 @@ struct rvgpu_pr_state *rvgpu_pr_init(struct rvgpu_egl_state *e,
 
 void rvgpu_pr_free(struct rvgpu_pr_state *p)
 {
+	// cmd_socket is closed by fclose(input_stream); don't close it here.
+	close(p->res_socket);
 	virgl_renderer_force_ctx_0();
 	virgl_renderer_cleanup(p);
 

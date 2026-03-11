@@ -26,8 +26,6 @@
 #include <xf86drmMode.h>
 #include <gbm.h>
 
-#include <netinet/tcp.h>
-
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -36,56 +34,6 @@
 #include <rvgpu-renderer/renderer/rvgpu-egl.h>
 #include <rvgpu-renderer/backend/rvgpu-gbm.h>
 #include <rvgpu-renderer/compositor/rvgpu-buffer-fd.h>
-
-void send_handle(int client_fd, void *handle)
-{
-	struct msghdr msg = { 0 };
-	char buf[CMSG_SPACE(sizeof(void *))];
-	memset(buf, 0, sizeof(buf));
-
-	struct iovec io = { .iov_base = (void *)"", .iov_len = 1 };
-
-	msg.msg_iov = &io;
-	msg.msg_iovlen = 1;
-	msg.msg_control = buf;
-	msg.msg_controllen = sizeof(buf);
-
-	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-	cmsg->cmsg_level = SOL_SOCKET;
-	cmsg->cmsg_type = SCM_RIGHTS;
-	cmsg->cmsg_len = CMSG_LEN(sizeof(void *));
-
-	*((void **)CMSG_DATA(cmsg)) = handle;
-
-	if (sendmsg(client_fd, &msg, 0) == -1)
-		perror("sendmsg");
-}
-
-void *recv_handle(int client_fd)
-{
-	struct msghdr msg = { 0 };
-
-	char m_buffer[1];
-	struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
-
-	msg.msg_iov = &io;
-	msg.msg_iovlen = 1;
-
-	char buf[CMSG_SPACE(sizeof(void *))];
-	msg.msg_control = buf;
-	msg.msg_controllen = sizeof(buf);
-
-	if (recvmsg(client_fd, &msg, 0) == -1) {
-		perror("recvmsg");
-		return NULL;
-	}
-
-	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-
-	void *handle = *((void **)CMSG_DATA(cmsg));
-
-	return handle;
-}
 
 void *create_shm_fd(const char *shm_name, int width, int height)
 {
@@ -250,12 +198,12 @@ void *create_dma_buffer_fd(uint32_t width, uint32_t height)
 
 void destroy_shm_fd(void *buffer_handle, const char *shm_name)
 {
-	if (buffer_handle == NULL) {
-		fprintf(stderr, "Invalid handle\n");
+	if (buffer_handle == NULL)
 		return;
-	}
 
 	int shm_fd = (int)(uintptr_t)buffer_handle;
+	if (shm_fd < 0)
+		return;
 
 	if (close(shm_fd) == -1) {
 		perror("close");
@@ -272,7 +220,13 @@ void destroy_shm_fd(void *buffer_handle, const char *shm_name)
 
 void destroy_dma_buffer_handle(void *buffer_handle)
 {
+	if (buffer_handle == NULL)
+		return;
+
 	int dma_fd = (int)(uintptr_t)buffer_handle;
+	if (dma_fd < 0)
+		return;
+
 	if (close(dma_fd) == -1) {
 		perror("close");
 	}
@@ -306,9 +260,9 @@ EGLuint64KHR select_modifier(EGLDisplay dpy, EGLint format)
 		printf("Modifier: 0x%lx, External Only: %s\n", modifiers[i],
 		       external_only[i] ? "Yes" : "No");
 		if (!external_only[i] &&
-                    selected_modifier == DRM_FORMAT_MOD_INVALID) {
-                        selected_modifier = modifiers[i];
-                }
+		    selected_modifier == DRM_FORMAT_MOD_INVALID) {
+			selected_modifier = modifiers[i];
+		}
 	}
 	printf("Selected modifier: 0x%lx\n", selected_modifier);
 	return selected_modifier;

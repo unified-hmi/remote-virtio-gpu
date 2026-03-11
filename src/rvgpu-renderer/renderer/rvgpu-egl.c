@@ -40,12 +40,16 @@
 #include <rvgpu-renderer/compositor/rvgpu-connection.h>
 #include <rvgpu-renderer/compositor/rvgpu-compositor.h>
 #include <rvgpu-renderer/compositor/rvgpu-buffer-fd.h>
+#include <rvgpu-renderer/compositor/rvgpu-json-helpers.h>
 
 extern PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
 extern PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC
 	glEGLImageTargetRenderbufferStorageOES;
 extern PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR;
 extern PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
+extern PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR;
+extern PFNEGLDESTROYSYNCKHRPROC eglDestroySyncKHR;
+extern PFNEGLCLIENTWAITSYNCKHRPROC eglClientWaitSyncKHR;
 
 extern platform_funcs_t pf_funcs;
 
@@ -324,6 +328,62 @@ void rvgpu_egl_free(struct rvgpu_egl_state *e)
 	eglTerminate(e->dpy);
 }
 
+void copyTexToTex(GLuint srcTex, GLuint dstTex, GLuint srcFbo, GLuint dstFbo,
+		  int width, int height)
+{
+	glBindTexture(GL_TEXTURE_2D, dstTex);
+	glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			       GL_TEXTURE_2D, dstTex, 0);
+
+	glBindTexture(GL_TEXTURE_2D, srcTex);
+	glBindFramebuffer(GL_FRAMEBUFFER, srcFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			       GL_TEXTURE_2D, srcTex, 0);
+
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFbo);
+
+	glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+			  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void copyEglTexToTex(EGLImageKHR eglImage, GLuint srcTex, GLuint srcFbo,
+		     GLuint dstTex, GLuint dstFbo, int width, int height)
+{
+	glBindTexture(GL_TEXTURE_2D, srcTex);
+	glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, eglImage);
+	glBindFramebuffer(GL_FRAMEBUFFER, srcFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			       GL_TEXTURE_2D, srcTex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+	    GL_FRAMEBUFFER_COMPLETE) {
+		printf("Src FBO not complete!\n");
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		return;
+	}
+
+	glBindTexture(GL_TEXTURE_2D, dstTex);
+	glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			       GL_TEXTURE_2D, dstTex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+	    GL_FRAMEBUFFER_COMPLETE) {
+		printf("Dst FBO not complete!\n");
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		return;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFbo);
+	glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+			  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
 void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 		    bool vsync)
 {
@@ -348,11 +408,9 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 
 	EGLImageKHR *eglImages = s->buf_state->eglImages;
 	void **shared_buffer_handles = s->buf_state->shared_buffer_handles;
+	uint32_t *shared_buffer_type = s->buf_state->shared_buffer_type;
 	uint32_t *width = s->buf_state->width;
 	uint32_t *height = s->buf_state->height;
-
-	json_t *json_obj = json_object();
-	char *json_str;
 
 	bool initialColor = false;
 	GLuint rvgpu_tex_id = 0;
@@ -414,147 +472,128 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 	    NULL) {
 		isNeedUpdateFD = true;
 	}
-	json_object_set_new(json_obj, "event_id",
-			    json_integer(RVGPU_DRAW_EVENT_ID));
-	json_object_set_new(
-		json_obj, "width",
-		json_integer(width[s->buf_state->shared_buffer_fd_index]));
-	json_object_set_new(
-		json_obj, "height",
-		json_integer(height[s->buf_state->shared_buffer_fd_index]));
-	json_object_set_new(json_obj, "shared_buffer_fd_index",
-			    json_integer(s->buf_state->shared_buffer_fd_index));
-	json_object_set_new(json_obj, "need_update_fd",
-			    json_integer(isNeedUpdateFD));
-	json_object_set_new(json_obj, "initial_color",
-			    json_integer(initialColor));
-	json_object_set_new(json_obj, "scanout_id",
-			    json_integer(s->scanout_id));
-	json_str = json_dumps(json_obj, JSON_ENCODE_ANY);
-	json_decref(json_obj);
 
 	if (rvgpu_tex_id != 0) {
 		if (isNeedUpdateFD) {
-			if (e->hardware_buffer_enabled) {
-				if (shared_buffer_handles
-					    [s->buf_state
-						     ->shared_buffer_fd_index] !=
-				    NULL) {
+			json_t *create_buf_cmd_json_obj = json_object();
+			json_object_set_new(create_buf_cmd_json_obj, "event_id",
+					json_integer(RVGPU_CREATE_BUFFER_EVENT_ID));
+			json_object_set_new(
+					create_buf_cmd_json_obj, "width",
+					json_integer(width[s->buf_state->shared_buffer_fd_index]));
+			json_object_set_new(
+					create_buf_cmd_json_obj, "height",
+					json_integer(height[s->buf_state->shared_buffer_fd_index]));
+			json_object_set_new(create_buf_cmd_json_obj, "scanout_id",
+					json_integer(s->scanout_id));
+			json_object_set_new(create_buf_cmd_json_obj, "shared_buffer_fd_index",
+					json_integer(s->buf_state->shared_buffer_fd_index));
+			char *create_buf_cmd_json_str = json_dumps(create_buf_cmd_json_obj, JSON_ENCODE_ANY);
+			send_str_with_size(e->server_rvgpu_control_fd, create_buf_cmd_json_str);
+			json_decref(create_buf_cmd_json_obj);
+			int buffer_type;
+			json_t *return_json_obj = recv_json(e->server_rvgpu_control_fd);
+			if (return_json_obj) {
+				if (shared_buffer_type[s->buf_state->shared_buffer_fd_index] == RVGPU_HARDWARE_BUFFER) {
+					if (eglImages[s->buf_state
+						      ->shared_buffer_fd_index] !=
+					    EGL_NO_IMAGE_KHR) {
+						EGLSyncKHR sync = eglCreateSyncKHR(e->dpy, EGL_SYNC_FENCE_KHR, NULL);
+						eglClientWaitSyncKHR(e->dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER_KHR);
+						eglDestroySyncKHR(e->dpy, sync);
+						eglDestroyImageKHR(
+							e->dpy,
+							eglImages[s->buf_state
+								  ->shared_buffer_fd_index]);
+						eglImages[s->buf_state
+							  ->shared_buffer_fd_index] =
+							EGL_NO_IMAGE_KHR;
+					}
 					destroy_hardware_buffer(
-						shared_buffer_handles
-							[s->buf_state
-								 ->shared_buffer_fd_index],
-						&pf_funcs);
-				}
-				void *hardware_buffer_handle = create_hardware_buffer(
-					width[s->buf_state
-						      ->shared_buffer_fd_index],
-					height[s->buf_state
-						       ->shared_buffer_fd_index],
-					&pf_funcs);
-				shared_buffer_handles
-					[s->buf_state->shared_buffer_fd_index] =
-						hardware_buffer_handle;
-			} else {
-				char shm_name[256];
-				snprintf(shm_name, sizeof(shm_name),
-					 "shm_name_%d_%s_%d",
-					 s->buf_state->shared_buffer_fd_index,
-					 e->rvgpu_surface_id, s->scanout_id);
-				if (shared_buffer_handles
-					    [s->buf_state
-						     ->shared_buffer_fd_index] !=
-				    NULL) {
+							(void *)shared_buffer_handles[s->buf_state->shared_buffer_fd_index],
+							&pf_funcs);
+				} else if (shared_buffer_type[s->buf_state->shared_buffer_fd_index] == RVGPU_SOFTWARE_BUFFER) {
 					destroy_shared_buffer(
-						shared_buffer_handles
-							[s->buf_state
-								 ->shared_buffer_fd_index],
-						shm_name, &pf_funcs);
+							(void *)(uintptr_t)
+							shared_buffer_handles[s->buf_state->shared_buffer_fd_index],
+							NULL,
+							&pf_funcs);
 				}
-				shared_buffer_handles[s->buf_state
-							      ->shared_buffer_fd_index] =
-					create_shared_buffer(
-						shm_name,
+				shared_buffer_handles[s->buf_state->shared_buffer_fd_index] = NULL;
+				get_int_from_jsonobj(return_json_obj, "buffer_type", &buffer_type);
+				void *shared_buffer_handle = recv_buffer_handle(
+						e->server_rvgpu_control_fd,
+						&pf_funcs);
+				shared_buffer_handles[s->buf_state->shared_buffer_fd_index] =
+					shared_buffer_handle;
+				if (shared_buffer_handles
+					    [s->buf_state->shared_buffer_fd_index] ==
+				    NULL) {
+					printf("child render cannot get shared buffer fds\n");
+					return;
+				}
+				shared_buffer_type[s->buf_state->shared_buffer_fd_index] = buffer_type;
+				//use EGL Extension dma buffer import
+				if (shared_buffer_type[s->buf_state->shared_buffer_fd_index] == RVGPU_HARDWARE_BUFFER) {
+					printf("create egl Image: %d\n",
+					       s->buf_state->shared_buffer_fd_index);
+					eglImages[s->buf_state->shared_buffer_fd_index] = create_egl_image(
+						e->dpy,
 						width[s->buf_state
 							      ->shared_buffer_fd_index],
 						height[s->buf_state
 							       ->shared_buffer_fd_index],
+						shared_buffer_handles
+							[s->buf_state
+								 ->shared_buffer_fd_index],
 						&pf_funcs);
-			}
-
-			if (shared_buffer_handles
-				    [s->buf_state->shared_buffer_fd_index] ==
-			    NULL) {
-				printf("child render cannot get shared buffer fds\n");
-				return;
+					glBindTexture(
+						GL_TEXTURE_2D,
+						s->dma_tex
+							[s->buf_state
+								 ->shared_buffer_fd_index]);
+					glEGLImageTargetTexture2DOES(
+						GL_TEXTURE_2D,
+						eglImages[s->buf_state
+								  ->shared_buffer_fd_index]);
+					glBindFramebuffer(
+						GL_FRAMEBUFFER,
+						s->dma_fb[s->buf_state
+								  ->shared_buffer_fd_index]);
+					glFramebufferTexture2D(
+						GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+						GL_TEXTURE_2D,
+						s->dma_tex
+							[s->buf_state
+								 ->shared_buffer_fd_index],
+						0);
+				}
 			}
 		}
 
-		if (e->hardware_buffer_enabled) {
-			//use EGL Extension dma buffer import
-			if (isNeedUpdateFD) {
-				if (eglImages[s->buf_state
-						      ->shared_buffer_fd_index] !=
-				    EGL_NO_IMAGE_KHR) {
-					eglDestroyImageKHR(
-						e->dpy,
-						eglImages[s->buf_state
-								  ->shared_buffer_fd_index]);
-					eglImages[s->buf_state
-							  ->shared_buffer_fd_index] =
-						EGL_NO_IMAGE_KHR;
-				}
-				printf("create egl Image: %d\n",
-				       s->buf_state->shared_buffer_fd_index);
-				eglImages[s->buf_state->shared_buffer_fd_index] = create_egl_image(
-					e->dpy,
-					width[s->buf_state
-						      ->shared_buffer_fd_index],
-					height[s->buf_state
-						       ->shared_buffer_fd_index],
-					shared_buffer_handles
-						[s->buf_state
-							 ->shared_buffer_fd_index],
-					&pf_funcs);
-				glBindTexture(
-					GL_TEXTURE_2D,
-					s->dma_tex
-						[s->buf_state
-							 ->shared_buffer_fd_index]);
-				glEGLImageTargetTexture2DOES(
-					GL_TEXTURE_2D,
-					eglImages[s->buf_state
-							  ->shared_buffer_fd_index]);
-				glBindFramebuffer(
-					GL_FRAMEBUFFER,
-					s->dma_fb[s->buf_state
-							  ->shared_buffer_fd_index]);
-				glFramebufferTexture2D(
-					GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-					GL_TEXTURE_2D,
-					s->dma_tex
-						[s->buf_state
-							 ->shared_buffer_fd_index],
-					0);
+		// Wait for the server's response confirming swap completion
+		if (vsync) {
+			pthread_mutex_lock(s->buf_state->swap_sync_mutex);
+			while (s->buf_state->composit_status
+				       [s->buf_state->shared_buffer_fd_index] ==
+			       1) {
+				pthread_cond_wait(
+					s->buf_state->swap_sync_cond,
+					s->buf_state->swap_sync_mutex);
 			}
-			glBindTexture(GL_TEXTURE_2D, rvgpu_tex_id);
-			glBindFramebuffer(GL_FRAMEBUFFER, rvgpu_fb);
-			glFramebufferTexture2D(GL_FRAMEBUFFER,
-					       GL_COLOR_ATTACHMENT0,
-					       GL_TEXTURE_2D, rvgpu_tex_id, 0);
-
-			glBindFramebuffer(
-				GL_DRAW_FRAMEBUFFER,
-				s->dma_fb[s->buf_state->shared_buffer_fd_index]);
-			glBlitFramebuffer(
-				0, 0,
-				width[s->buf_state->shared_buffer_fd_index],
-				height[s->buf_state->shared_buffer_fd_index], 0,
-				0, width[s->buf_state->shared_buffer_fd_index],
-				height[s->buf_state->shared_buffer_fd_index],
-				GL_COLOR_BUFFER_BIT, GL_NEAREST);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		} else {
+			pthread_mutex_unlock(s->buf_state->swap_sync_mutex);
+		}
+		if (shared_buffer_type[s->buf_state->shared_buffer_fd_index] ==
+		    RVGPU_HARDWARE_BUFFER) {
+			copyTexToTex(rvgpu_tex_id,
+				     s->dma_tex[s->buf_state->shared_buffer_fd_index],
+				     rvgpu_fb,
+				     s->dma_fb[s->buf_state->shared_buffer_fd_index],
+				     width[s->buf_state->shared_buffer_fd_index],
+				     height[s->buf_state->shared_buffer_fd_index]);
+		} else if (shared_buffer_type
+				   [s->buf_state->shared_buffer_fd_index] ==
+			   RVGPU_SOFTWARE_BUFFER) {
 			//use PBO without EGL Extension dma buffer import
 			static void *shmBufferPtr = NULL;
 			static void *pboPtr = NULL;
@@ -602,28 +641,41 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 
 		//wait texture update
 		GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-		GLenum waitReturn = glClientWaitSync(
-			sync, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
-		if (waitReturn != GL_ALREADY_SIGNALED &&
-		    waitReturn != GL_CONDITION_SATISFIED) {
+		GLenum waitReturn = glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+		if (waitReturn != GL_ALREADY_SIGNALED && waitReturn != GL_CONDITION_SATISFIED) {
 			fprintf(stderr, "Failed to wait for sync object\n");
 			glDeleteSync(sync);
 			return;
 		}
 		glDeleteSync(sync);
+
+		json_t *json_obj = json_object();
+		json_object_set_new(json_obj, "event_id",
+				json_integer(RVGPU_DRAW_EVENT_ID));
+		json_object_set_new(
+				json_obj, "width",
+				json_integer(width[s->buf_state->shared_buffer_fd_index]));
+		json_object_set_new(
+				json_obj, "height",
+				json_integer(height[s->buf_state->shared_buffer_fd_index]));
+		json_object_set_new(json_obj, "shared_buffer_fd_index",
+				json_integer(s->buf_state->shared_buffer_fd_index));
+		json_object_set_new(json_obj, "initial_color",
+				json_integer(initialColor));
+		json_object_set_new(json_obj, "scanout_id",
+				json_integer(s->scanout_id));
+		char *json_str = json_dumps(json_obj, JSON_ENCODE_ANY);
+		json_decref(json_obj);
 #if 0
 		//send command
 		printf("send_str_with_size write: %s\n", json_str);
 #endif
-		send_str_with_size(e->server_rvgpu_fd, json_str);
-		if (isNeedUpdateFD) {
-			send_buffer_handle(
-				e->server_rvgpu_fd,
-				shared_buffer_handles
-					[s->buf_state->shared_buffer_fd_index],
-				&pf_funcs);
-		}
-
+		pthread_mutex_lock(s->buf_state->swap_sync_mutex);
+		s->buf_state
+			->composit_status[s->buf_state->shared_buffer_fd_index] =
+			1;
+		pthread_mutex_unlock(s->buf_state->swap_sync_mutex);
+		send_str_with_size(e->server_rvgpu_control_fd, json_str);
 		if (s->fps_params.show_fps) {
 			draw_swap_time_ms =
 				current_get_time_ms() - swap_laptime;
@@ -665,12 +717,12 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 			}
 			s->fps_params.swap_cnt++;
 		}
-
 		s->buf_state->shared_buffer_fd_index =
-			(s->buf_state->shared_buffer_fd_index + 1) % 2;
+			(s->buf_state->shared_buffer_fd_index + 1) % s->buf_state->plane_buffer_count;
 	}
 	s->fps_params.rvgpu_laptime_ms = current_get_time_ms();
 }
+
 
 void rvgpu_egl_drawall(struct rvgpu_egl_state *e, unsigned int res_id,
 		       bool vsync)

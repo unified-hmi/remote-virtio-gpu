@@ -53,12 +53,20 @@ struct rvgpu_egl_params {
 	unsigned int clear_color; /**< Color of empty screen */
 };
 
+#define RVGPU_SOFTWARE_BUFFER 0
+#define RVGPU_HARDWARE_BUFFER 1
+
 struct rvgpu_buffer_state {
-	int shared_buffer_fd_index;
+	uint32_t shared_buffer_fd_index;
+	uint32_t plane_buffer_count;
 	EGLImageKHR eglImages[2];
 	void *shared_buffer_handles[2];
+	uint32_t shared_buffer_type[2];
 	uint32_t width[2];
 	uint32_t height[2];
+	uint32_t composit_status[2];
+	pthread_mutex_t *swap_sync_mutex;
+	pthread_cond_t *swap_sync_cond;
 };
 
 struct rvgpu_fps_params {
@@ -74,6 +82,7 @@ struct rvgpu_focus_state {
 	json_t *touch_focused_json_obj;
 	json_t *pointer_focused_json_obj;
 	json_t *keyboard_focused_json_obj;
+	uint32_t touch_down_count;
 	double pre_pointer_pos_x;
 	double pre_pointer_pos_y;
 	pthread_mutex_t *input_send_event_mutex;
@@ -178,8 +187,11 @@ struct rvgpu_egl_state {
 	EGLSurface sfc;
 	EGLConfig config;
 	EGLContext context;
+	uint32_t frame_count;
 	char *rvgpu_surface_id;
 	int server_rvgpu_fd;
+	int server_rvgpu_control_fd;
+	int server_rvgpu_sync_fd;
 	bool hardware_buffer_enabled;
 	/* callbacks */
 	const struct rvgpu_egl_callbacks *cb;
@@ -261,6 +273,12 @@ void rvgpu_init_glsyncobjs_state(
 
 void rvgpu_glsyncobjs_state_free(
 	struct rvgpu_glsyncobjs_state *glsyncobjs_state);
+
+void copyTexToTex(GLuint srcTex, GLuint dstTex, GLuint srcFbo, GLuint dstFbo,
+		  int width, int height);
+
+void copyEglTexToTex(EGLImageKHR eglImage, GLuint srcTex, GLuint srcFbo,
+		     GLuint dstTex, GLuint dstFbo, int width, int height);
 
 /** Container of macro for callback implementation */
 #define rvgpu_container_of(ptr, typ, member)                                   \

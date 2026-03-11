@@ -100,6 +100,7 @@ struct rvgpu_layout_params {
 struct request_thread_params {
 	int event_fd;
 	int req_write_fd;
+	struct rvgpu_egl_state *egl;
 	struct rvgpu_layout_params layout_params;
 	struct rvgpu_domain_sock_params domain_params;
 	pthread_mutex_t *rvgpu_request_mutex;
@@ -175,5 +176,7 @@ void rvgpu_compositor_run(struct rvgpu_compositor_params *params);
 #define RVGPU_LAYOUT_EVENT_ID -3
 #define RVGPU_ADD_EVENT_ID -4
 #define RVGPU_STOP_EVENT_ID -5
+#define RVGPU_SYNC_EVENT_ID -6
+#define RVGPU_CREATE_BUFFER_EVENT_ID -7
 
 #endif /* RVGPU_COMPOSITOR_H */

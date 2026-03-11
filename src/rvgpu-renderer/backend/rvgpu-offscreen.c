@@ -68,11 +68,13 @@ static void rvgpu_compositor_offscreen_create_scanout(struct rvgpu_egl_state *e,
 
 		s->buf_state->eglImages[i] = EGL_NO_IMAGE_KHR;
 		s->buf_state->shared_buffer_handles[i] = NULL;
+		s->buf_state->shared_buffer_type[i] = RVGPU_HARDWARE_BUFFER;
 		s->buf_state->width[i] = 0;
 		s->buf_state->height[i] = 0;
+		s->buf_state->composit_status[i] = 0;
 	}
 	s->buf_state->shared_buffer_fd_index = 0;
-
+	s->buf_state->plane_buffer_count = 2;
 	//for shm mem
 	glGenBuffers(1, &s->shm_pb);
 
@@ -108,8 +110,10 @@ rvgpu_compositor_offscreen_destroy_scanout(struct rvgpu_egl_state *e,
 
 static void rvgpu_compositor_offscreen_free(struct rvgpu_egl_state *e)
 {
-	for (unsigned int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++)
-		rvgpu_egl_destroy_scanout(e, &e->scanouts[i]);
+	for (unsigned int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
+		if (e->scanouts[i].buf_state != NULL)
+			rvgpu_egl_destroy_scanout(e, &e->scanouts[i]);
+	}
 
 	rvgpu_destroy_all_vscanouts(e);
 	rvgpu_glsyncobjs_state_free(e->glsyncobjs_state);

@@ -190,6 +190,11 @@ void rvgpu_handle_connection(struct rvgpu_compositor_params *params)
 		} else {
 			if (fds.revents & POLLIN) {
 				char *received_data = recv_str_all(newsock);
+				if (received_data == NULL) {
+					close(newsock);
+					close(rsocket);
+					continue;
+				}
 				strncpy(rvgpu_surface_id, received_data,
 					max_id_length - 1);
 				rvgpu_surface_id[max_id_length - 1] = '\0';
@@ -266,8 +271,6 @@ void rvgpu_handle_connection(struct rvgpu_compositor_params *params)
 			render_params->domain_params = domain_params;
 			render_params->capset_file = capset_file;
 			rvgpu_render(render_params);
-			close(render_params->command_socket);
-			close(render_params->resource_socket);
 			free(render_params);
 			printf("rvgpu_surface_id %s render process finished\n",
 			       rvgpu_surface_id);

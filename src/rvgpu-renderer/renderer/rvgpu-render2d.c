@@ -1044,7 +1044,10 @@ static int draw_2d_texture_in(texparam_t *tparam)
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
 	glDisable(GL_BLEND);
-
+	GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	glFlush();
+	glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+	glDeleteSync(fence);
 	return 0;
 }
 

@@ -96,25 +96,29 @@ void touch_down_cb(int32_t input_id, double x, double y,
 	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	send_event(client_rvgpu_fd, json_obj, RVGPU_TOUCH_DOWN_EVENT_ID, x, y,
 		   -1, -1);
-	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	egl->focus_state.touch_focused_json_obj = json_obj;
+	egl->focus_state.touch_down_count += 1;
 	egl->focus_state.keyboard_focused_json_obj = json_obj;
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void touch_up_cb(int32_t input_id, struct rvgpu_egl_state *egl)
 {
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
+		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		json_object_set_new(egl->focus_state.touch_focused_json_obj,
 				    "input_id", json_integer(input_id));
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.touch_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.touch_focused_json_obj,
 			   RVGPU_TOUCH_UP_EVENT_ID, -1, -1, -1, -1);
+		egl->focus_state.touch_down_count -= 1;
+		if (egl->focus_state.touch_down_count == 0) {
+			egl->focus_state.touch_focused_json_obj = NULL;
+		}
 		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
-		egl->focus_state.touch_focused_json_obj = NULL;
 	}
 }
 
@@ -122,12 +126,12 @@ void touch_motion_cb(int32_t input_id, double x, double y,
 		     struct rvgpu_egl_state *egl)
 {
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
+		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		json_object_set_new(egl->focus_state.touch_focused_json_obj,
 				    "input_id", json_integer(input_id));
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.touch_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.touch_focused_json_obj,
 			   RVGPU_TOUCH_MOTION_EVENT_ID, x, y, -1, -1);

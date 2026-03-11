@@ -51,12 +51,17 @@
 #include <rvgpu-renderer/compositor/rvgpu-compositor.h>
 #include <rvgpu-renderer/compositor/rvgpu-connection.h>
 
+
 PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
 PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC
 glEGLImageTargetRenderbufferStorageOES;
 
 PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR;
 PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
+
+PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR;
+PFNEGLDESTROYSYNCKHRPROC eglDestroySyncKHR;
+PFNEGLCLIENTWAITSYNCKHRPROC eglClientWaitSyncKHR;
 
 platform_funcs_t pf_funcs;
 
@@ -73,7 +78,11 @@ struct input_event_thread_params {
 struct rvgpu_request_params {
 	char *rvgpu_surface_id;
 	int client_rvgpu_fd;
+	int client_rvgpu_control_fd;
+	int client_rvgpu_sync_fd;
+	int client_rvgpu_term_fd;
 	int req_write_fd;
+	struct rvgpu_egl_state *egl;
 	pthread_mutex_t *rvgpu_request_mutex;
 };
 
@@ -174,6 +183,19 @@ json_t *get_focus_rvgpu_layout(double x, double y,
 					 &rvgpu_surface_id) == -1) {
 			continue;
 		}
+
+		bool has_rvgpu_surface = false;
+		size_t surface_list_size = json_array_size(draw_list_params->rvgpu_surface_list);
+		for (size_t i = 0; i < surface_list_size; ++i) {
+			json_t *s = json_array_get(draw_list_params->rvgpu_surface_list, i);
+			const char *sid = NULL;
+			if (s != NULL && get_str_from_jsonobj(s, "rvgpu_surface_id", &sid) == 0 && sid && strcmp(sid, rvgpu_surface_id) == 0) {
+				has_rvgpu_surface = true;
+				break;
+			}
+		}
+		if (!has_rvgpu_surface)
+			continue;
 
 		double dst_x, dst_y, dst_w, dst_h;
 		get_double_from_jsonobj(sfc_value, "dst_x", &dst_x);
@@ -371,12 +393,12 @@ void *layout_event_loop(void *arg)
 
 #if 0
 			int layout_id;
-                        printf("rvgpu_layout_list order: ");
-                        json_array_foreach(layout_params.rvgpu_layout_list, index, value) {
-                                get_int_from_jsonobj (value, "id", &layout_id);
-                                printf("%d ", layout_id);
-                        }
-                        printf("\n");
+			printf("rvgpu_layout_list order: ");
+			json_array_foreach(layout_params.rvgpu_layout_list, index, value) {
+				get_int_from_jsonobj (value, "id", &layout_id);
+				printf("%d ", layout_id);
+			}
+			printf("\n");
 #endif
 
 			char *json_cmd;
@@ -418,106 +440,465 @@ void *request_event_loop(void *arg)
 	struct rvgpu_request_params *params =
 		(struct rvgpu_request_params *)arg;
 	int client_rvgpu_fd = params->client_rvgpu_fd;
+	int client_rvgpu_control_fd = params->client_rvgpu_control_fd;
+	int client_rvgpu_sync_fd = params->client_rvgpu_sync_fd;
+	int client_rvgpu_term_fd = params->client_rvgpu_term_fd;
 	int req_write_fd = params->req_write_fd;
 	char *rvgpu_surface_id = params->rvgpu_surface_id;
+	struct rvgpu_egl_state *egl = params->egl;
 	pthread_mutex_t *rvgpu_request_mutex = params->rvgpu_request_mutex;
-	struct pollfd client_rvgpu_pfd = { .fd = client_rvgpu_fd,
-					   .events = POLLIN };
+	struct pollfd client_rvgpu_control_pfd = {.fd = client_rvgpu_control_fd, .events = POLLIN};
+	uint32_t last_frame_count = 0;
 	int event_id;
+	json_t *rvgpu_texture_list = json_array();
+	EGLint ctxattr[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, 3,
+		EGL_CONTEXT_MINOR_VERSION_KHR, 0, EGL_NONE };
+	EGLContext thread_ctx = eglCreateContext(egl->dpy, egl->config, egl->context, ctxattr);
+	eglMakeCurrent(egl->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, thread_ctx);
 	while (1) {
-		int ret = poll(&client_rvgpu_pfd, 1, -1);
+		int ret = poll(&client_rvgpu_control_pfd, 1, -1);
 		if (ret == -1) {
 			perror("request_event_loop poll");
 			break;
 		}
 		// update surface list based on request commands
-		if (client_rvgpu_pfd.revents & POLLIN) {
+		if (client_rvgpu_control_pfd.revents & POLLIN) {
 			int img_w, img_h;
-			int fd_index, need_update_fd;
-			uintptr_t buf_handle;
+			int shared_buffer_fd_index;
 			int initial_color;
 			int scanout_id;
-			json_t *json_obj = recv_json(client_rvgpu_fd);
+			json_t *json_obj = recv_json(client_rvgpu_control_fd);
+			// printf("JSON Command Object: %s\n", json_dumps(json_obj, 0));
+
 			json_t *json_cmd_obj = json_object();
+			if (json_cmd_obj == NULL) {
+				json_decref(json_obj);
+				fprintf(stderr, "Failed to create json_cmd_obj\n");
+				break;
+			}
 
 			if (json_obj != NULL) {
+
 				if (get_int_from_jsonobj(json_obj, "event_id",
 							 &event_id) == -1) {
+					json_decref(json_cmd_obj);
+					json_decref(json_obj);
 					continue;
 				}
 				if (event_id == RVGPU_ADD_EVENT_ID) {
 					if (get_int_from_jsonobj(
 						    json_obj, "scanout_id",
 						    &scanout_id) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
 						continue;
 					}
 					json_object_set_new(
 						json_cmd_obj, "client_rvgpu_fd",
 						json_integer(client_rvgpu_fd));
-					json_t *json_texture_array =
-						json_array();
-					json_object_set_new(json_cmd_obj,
-							    "textures",
-							    json_texture_array);
-					json_t *json_fd_index_array =
-						json_array();
 					json_object_set_new(
-						json_cmd_obj, "fd_indexs",
-						json_fd_index_array);
+						json_cmd_obj,
+						"client_rvgpu_sync_fd",
+						json_integer(
+							client_rvgpu_sync_fd));
 					json_object_set_new(
 						json_cmd_obj, "scanout_id",
 						json_integer(scanout_id));
-				} else if (event_id == RVGPU_DRAW_EVENT_ID) {
+					json_t *json_composit_obj = json_object();
+					json_t *json_tex_array = json_array();
+					json_t *json_fbo_array = json_array();
+					json_t *json_buf_handle_array = json_array();
+					json_t *json_buf_type_array = json_array();
+					json_t *json_egl_tex_array = json_array();
+					json_t *json_egl_fbo_array = json_array();
+					json_t *json_egl_image_array = json_array();
+					GLuint tex_id[2];
+					GLuint fbo_id[2];
+					for (int i = 0; i < 2; i++) {
+						glGenFramebuffers(1, &fbo_id[i]);
+						glGenTextures(1, &tex_id[i]);
+						glBindTexture(GL_TEXTURE_2D, tex_id[i]);
+						glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+								GL_LINEAR);
+						glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+								GL_LINEAR);
+						glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+								GL_CLAMP_TO_EDGE);
+						glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+								GL_CLAMP_TO_EDGE);
+						json_array_append_new(json_tex_array, json_integer(tex_id[i]));
+						json_array_append_new(json_fbo_array, json_integer(fbo_id[i]));
+					}
+
+					json_object_set_new(json_composit_obj, "scanout_id", json_integer(scanout_id));
+					json_object_set_new(json_composit_obj, "textures", json_tex_array);
+					json_object_set_new(json_composit_obj, "fbos", json_fbo_array);
+					json_object_set_new(json_composit_obj, "buf_handle_ptrs", json_buf_handle_array);
+					json_object_set_new(json_composit_obj, "buf_types", json_buf_type_array);
+					json_object_set_new(json_composit_obj, "egl_textures", json_egl_tex_array);
+					json_object_set_new(json_composit_obj, "egl_fbos", json_egl_fbo_array);
+					json_object_set_new(json_composit_obj, "egl_images", json_egl_image_array);
+					json_array_append_new(rvgpu_texture_list, json_composit_obj);
+				} else if (event_id == RVGPU_CREATE_BUFFER_EVENT_ID) {
+					// printf("RVGPU_CREATE_BUFFER_EVENT_ID command: %s\n", json_dumps(json_obj, 0));
 					if (get_int_from_jsonobj(
 						    json_obj, "width",
 						    &img_w) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
 						continue;
 					}
 					if (get_int_from_jsonobj(
 						    json_obj, "height",
 						    &img_h) == -1) {
-						continue;
-					}
-					if (get_int_from_jsonobj(
-						    json_obj,
-						    "shared_buffer_fd_index",
-						    &fd_index) == -1) {
-						continue;
-					}
-					if (get_int_from_jsonobj(
-						    json_obj, "need_update_fd",
-						    &need_update_fd) == -1) {
-						continue;
-					}
-					if (get_int_from_jsonobj(
-						    json_obj, "initial_color",
-						    &initial_color) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
 						continue;
 					}
 					if (get_int_from_jsonobj(
 						    json_obj, "scanout_id",
 						    &scanout_id) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
 						continue;
 					}
-					if (need_update_fd) {
-						while (1) {
-							ret = poll(
-								&client_rvgpu_pfd,
-								1, -1);
-							if (ret == -1) {
-								perror("get buffer_handle poll");
-								break;
-							}
-							if (client_rvgpu_pfd
-								    .revents &
-							    POLLIN) {
-								void *buffer_handle = recv_buffer_handle(
-									client_rvgpu_fd,
+					if (get_int_from_jsonobj(
+						    json_obj, "shared_buffer_fd_index",
+						    &shared_buffer_fd_index) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+
+					json_t *json_composit_obj = get_jsonobj_with_int_key(
+							rvgpu_texture_list,
+							"scanout_id",
+							scanout_id);
+					if (json_composit_obj == NULL) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					void *shared_buffer_handle = NULL;
+					uint32_t shared_buffer_type = RVGPU_HARDWARE_BUFFER;
+					if (egl->hardware_buffer_enabled) {
+						void *hardware_buffer_handle = create_hardware_buffer(
+								img_w,
+								img_h,
+								&pf_funcs);
+						if (hardware_buffer_handle == NULL) {
+							goto fallback_shared_buffer;
+						}
+						shared_buffer_handle = hardware_buffer_handle;
+						goto end;
+					} else {
+						goto fallback_shared_buffer;
+					}
+fallback_shared_buffer:
+					shared_buffer_type = RVGPU_SOFTWARE_BUFFER;
+					char shm_name[256];
+					snprintf(shm_name, sizeof(shm_name),
+						 "shm_name_%d_%s_%d",
+						 shared_buffer_fd_index,
+						 rvgpu_surface_id, scanout_id);
+
+					void *software_buffer_handle =
+						create_shared_buffer(
+							shm_name,
+							img_w,
+							img_h,
+							&pf_funcs);
+					shared_buffer_handle = software_buffer_handle;
+
+end:
+					if (shared_buffer_handle == NULL) {
+						fprintf(stderr, "Failed to create shared buffer handle\n");
+					}
+					json_t *json_buf_handle_array = json_object_get(
+							json_composit_obj,
+							"buf_handle_ptrs");
+					json_t *json_pre_buf_handle = json_array_get(json_buf_handle_array, shared_buffer_fd_index);
+					uintptr_t pre_buf_handle = 0;
+					if (json_pre_buf_handle) {
+						pre_buf_handle = json_integer_value(json_pre_buf_handle);
+					}
+					json_t *json_buf_type_array = json_object_get(
+							json_composit_obj,
+							"buf_types");
+					json_t *json_pre_buf_type = json_array_get(json_buf_type_array, shared_buffer_fd_index);
+					int pre_buf_type = RVGPU_HARDWARE_BUFFER;
+					if (json_pre_buf_type) {
+						pre_buf_type = json_integer_value(json_pre_buf_type);
+					}
+					if (pre_buf_handle != 0) {
+						if (pre_buf_type == RVGPU_HARDWARE_BUFFER) {
+							destroy_hardware_buffer(
+									(void *)pre_buf_handle,
 									&pf_funcs);
-								buf_handle = (uintptr_t)
-									buffer_handle;
-								break;
+						} else if (pre_buf_type == RVGPU_SOFTWARE_BUFFER) {
+							destroy_shared_buffer(
+									(void *)(uintptr_t)
+									pre_buf_handle,
+									NULL,
+									&pf_funcs);
+						}
+						insert_integar_json_array_with_index(
+							json_buf_handle_array,
+							shared_buffer_fd_index,
+							json_integer(0));
+						insert_integar_json_array_with_index(
+							json_buf_type_array,
+							shared_buffer_fd_index,
+							json_integer(0));
+					}
+					if (shared_buffer_type == RVGPU_HARDWARE_BUFFER) {
+						json_t *json_egl_image_array = json_object_get(
+										json_composit_obj,
+										"egl_images");
+						json_t *json_egl_image = json_array_get(json_egl_image_array, shared_buffer_fd_index);
+						uintptr_t egl_image_ptr = (uintptr_t)json_integer_value(json_egl_image);
+						EGLImageKHR egl_image = (EGLImageKHR) egl_image_ptr;
+						if (egl_image != EGL_NO_IMAGE_KHR) {
+							EGLSyncKHR sync = eglCreateSyncKHR(egl->dpy, EGL_SYNC_FENCE_KHR, NULL);
+							eglClientWaitSyncKHR(egl->dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER_KHR);
+							eglDestroySyncKHR(egl->dpy, sync);
+							eglDestroyImageKHR(egl->dpy, egl_image);
+							egl_image = EGL_NO_IMAGE_KHR;
+						}
+						insert_integar_json_array_with_index(
+							json_egl_image_array,
+							shared_buffer_fd_index,
+							json_integer(0));
+						egl_image = create_egl_image(
+								egl->dpy,
+								img_w,
+								img_h,
+								(void *) (uintptr_t)shared_buffer_handle,
+								&pf_funcs);
+
+						insert_integar_json_array_with_index(
+								json_egl_image_array,
+								shared_buffer_fd_index,
+								json_integer((uintptr_t) egl_image));
+
+						json_t *json_egl_tex_array = json_object_get(
+										json_composit_obj,
+										"egl_textures");
+						json_t *json_egl_fbo_array = json_object_get(
+										json_composit_obj,
+										"egl_fbos");
+						json_t *json_egl_tex = json_array_get(json_egl_tex_array, shared_buffer_fd_index);
+						json_t *json_egl_fbo = json_array_get(json_egl_fbo_array, shared_buffer_fd_index);
+						if (!json_egl_tex && !json_egl_fbo) {
+							GLuint egl_tex_id;
+							glGenTextures(1, &egl_tex_id);
+							glBindTexture(GL_TEXTURE_2D, egl_tex_id);
+							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+									GL_LINEAR);
+							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+									GL_LINEAR);
+							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+									GL_CLAMP_TO_EDGE);
+							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+									GL_CLAMP_TO_EDGE);
+							glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, egl_image);
+							GLuint egl_fbo_id;
+							glGenFramebuffers(1, &egl_fbo_id);
+							glBindFramebuffer(GL_FRAMEBUFFER, egl_fbo_id);
+							glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+									GL_TEXTURE_2D,
+									egl_tex_id, 0);
+							insert_integar_json_array_with_index(
+								json_egl_tex_array,
+								shared_buffer_fd_index,
+								json_integer(egl_tex_id));
+							insert_integar_json_array_with_index(
+								json_egl_fbo_array,
+								shared_buffer_fd_index,
+								json_integer(egl_fbo_id));
+						} else {
+							GLuint egl_tex_id = (GLuint) json_integer_value(json_egl_tex);
+							GLuint egl_fbo_id = (GLuint) json_integer_value(json_egl_fbo);
+							glBindTexture(GL_TEXTURE_2D, egl_tex_id);
+							glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, egl_image);
+							glBindFramebuffer(GL_FRAMEBUFFER, egl_fbo_id);
+							glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+									GL_TEXTURE_2D,
+									egl_tex_id, 0);
+						}
+					}
+					// set shared_buffer_handle, shared_buffer_type
+					insert_integar_json_array_with_index(
+								json_buf_handle_array,
+								shared_buffer_fd_index,
+								json_integer((uintptr_t)shared_buffer_handle));
+					insert_integar_json_array_with_index(
+								json_buf_type_array,
+								shared_buffer_fd_index,
+								json_integer(shared_buffer_type));
+
+					json_t *return_cmd_json_obj = json_object();
+					json_object_set_new(return_cmd_json_obj, "buffer_type",
+							json_integer(shared_buffer_type));
+					char *return_cmd_json_str = json_dumps(return_cmd_json_obj, JSON_ENCODE_ANY);
+					send_str_with_size(client_rvgpu_control_fd, return_cmd_json_str);
+					json_decref(return_cmd_json_obj);
+					send_buffer_handle(client_rvgpu_control_fd,
+							shared_buffer_handle,
+							&pf_funcs);
+					// printf("RVGPU_CREATE_BUFFER_EVENT_ID updated json_composit_obj: %s\n", json_dumps(json_composit_obj, 0));
+					continue;
+				} else if (event_id == RVGPU_DRAW_EVENT_ID) {
+					if (get_int_from_jsonobj(
+						    json_obj, "width",
+						    &img_w) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					if (get_int_from_jsonobj(
+						    json_obj, "height",
+						    &img_h) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					if (get_int_from_jsonobj(
+						    json_obj, "shared_buffer_fd_index",
+						    &shared_buffer_fd_index) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					if (get_int_from_jsonobj(
+						    json_obj, "initial_color",
+						    &initial_color) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					if (get_int_from_jsonobj(
+						    json_obj, "scanout_id",
+						    &scanout_id) == -1) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					// get the latest json data for composition
+					json_t *json_composit_obj = get_jsonobj_with_int_key(
+							rvgpu_texture_list,
+							"scanout_id",
+							scanout_id);
+
+					if (json_composit_obj == NULL) {
+						json_decref(json_cmd_obj);
+						json_decref(json_obj);
+						continue;
+					}
+					json_t *json_buf_type_array = json_object_get(
+							json_composit_obj,
+							"buf_types");
+					json_t *json_buf_type = json_array_get(json_buf_type_array,
+							shared_buffer_fd_index);
+
+					int buf_type = RVGPU_HARDWARE_BUFFER;
+					if (json_buf_type) {
+						buf_type = json_integer_value(json_buf_type);
+					}
+					json_t *json_texture_array = json_object_get(
+										json_composit_obj,
+										"textures");
+					json_t *json_fbo_array = json_object_get(
+										json_composit_obj,
+										"fbos");
+					json_t *json_tex_id = json_array_get(
+						json_texture_array,
+						shared_buffer_fd_index);
+					json_t *json_fbo_id = json_array_get(
+						json_fbo_array,
+						shared_buffer_fd_index);
+					GLuint composit_tex_id = (GLuint)json_integer_value(json_tex_id);
+					GLuint composit_fbo_id = (GLuint)json_integer_value(json_fbo_id);
+					if (buf_type == RVGPU_HARDWARE_BUFFER) {
+						json_t *json_egl_tex_array = json_object_get(                                                                                                     json_composit_obj,
+									"egl_textures");
+						json_t *json_egl_fbo_array = json_object_get(                                                                                                     json_composit_obj,
+									"egl_fbos");
+						json_t *json_egl_image_array = json_object_get(                                                                                                     json_composit_obj,
+									"egl_images");
+						json_t *json_egl_image = json_array_get(json_egl_image_array, shared_buffer_fd_index);
+						json_t *json_egl_tex = json_array_get(json_egl_tex_array, shared_buffer_fd_index);
+						json_t *json_egl_fbo = json_array_get(json_egl_fbo_array, shared_buffer_fd_index);
+						uintptr_t egl_image_ptr = (uintptr_t)json_integer_value(json_egl_image);
+						EGLImageKHR egl_image = (EGLImageKHR) egl_image_ptr;
+						GLuint egl_tex_id = (GLuint) json_integer_value(json_egl_tex);
+						GLuint egl_fbo_id = (GLuint) json_integer_value(json_egl_fbo);
+						size_t egl_size = json_array_size(json_egl_image_array);
+						// for single shared buffer approach with copy
+						if (egl_size == 1) {
+							// printf("RVGPU_DRAW_EVENT_ID single shared buffer with copy, tex_id: %d, index: %d\n", composit_tex_id, shared_buffer_fd_index);
+#if 0
+							copyEglTexToTex(egl_image, egl_tex_id, egl_fbo_id,
+									composit_tex_id, composit_fbo_id,
+									img_w, img_h);
+#else
+							if (last_frame_count == 0 || last_frame_count != egl->frame_count) {
+								copyEglTexToTex(egl_image, egl_tex_id, egl_fbo_id,
+										composit_tex_id, composit_fbo_id,
+										img_w, img_h);
+								last_frame_count = egl->frame_count;
+							} else {
+								json_decref(json_cmd_obj);
+								json_decref(json_obj);
+								continue;
 							}
+#endif
+							// for multiple shared buffer approach with zero copy
+						} else if (egl_size > 1) {
+							composit_tex_id = egl_tex_id;
+							//printf("RVGPU_DRAW_EVENT_ID multiple shared buffers without copy, rvgpu_surface_id: %s, tex_id: %d index: %d\n", rvgpu_surface_id, composit_tex_id, shared_buffer_fd_index);
+						}
+					} else if (buf_type == RVGPU_SOFTWARE_BUFFER) {
+						json_t *json_buf_handle_array = json_object_get(
+								json_composit_obj,
+								"buf_handle_ptrs");
+						json_t *json_buf_handle = json_array_get(json_buf_handle_array, shared_buffer_fd_index);
+						if (json_buf_handle) {
+							uintptr_t buf_handle =
+								json_integer_value(json_buf_handle);
+							void *shm_buffer_ptr = mmap(
+									NULL,
+									img_w * img_h *
+									4,
+									PROT_READ,
+									MAP_SHARED,
+									(int)(uintptr_t)
+									buf_handle,
+									0);
+							if (shm_buffer_ptr ==
+									MAP_FAILED) {
+								perror("mmap");
+							}
+							glBindTexture(
+									GL_TEXTURE_2D,
+									composit_tex_id);
+
+							glTexImage2D(
+									GL_TEXTURE_2D,
+									0,
+									GL_RGBA,
+									img_w,
+									img_h,
+									0,
+									GL_RGBA,
+									GL_UNSIGNED_BYTE,
+									shm_buffer_ptr);
+							glBindTexture(
+									GL_TEXTURE_2D,
+									0);
+							munmap(shm_buffer_ptr,
+									img_w * img_h *
+									4);
 						}
 					}
 					json_object_set_new(
@@ -527,43 +908,213 @@ void *request_event_loop(void *arg)
 						json_cmd_obj, "height",
 						json_integer(img_h));
 					json_object_set_new(
-						json_cmd_obj,
-						"shared_buffer_fd_index",
-						json_integer(fd_index));
-					json_object_set_new(
-						json_cmd_obj, "need_update_fd",
-						json_integer(need_update_fd));
-					json_object_set_new(
-						json_cmd_obj, "buf_handle",
-						json_integer(buf_handle));
-					json_object_set_new(
 						json_cmd_obj, "initial_color",
 						json_integer(initial_color));
 					json_object_set_new(
 						json_cmd_obj, "scanout_id",
 						json_integer(scanout_id));
+					json_object_set_new(
+						json_cmd_obj,
+						"shared_buffer_fd_index",
+						json_integer(
+							shared_buffer_fd_index));
+					json_object_set_new(
+						json_cmd_obj, "composit_tex_id",
+						json_integer(composit_tex_id));
 				}
 			} else {
+				size_t index;
+				json_t *value;
+				json_array_foreach(rvgpu_texture_list, index, value) {
+					json_t *json_texture_array = json_object_get(
+							value,
+							"textures");
+					json_t *json_fbo_array = json_object_get(
+							value,
+							"fbos");
+					json_t *json_egl_tex_array = json_object_get(
+							value,
+							"egl_textures");
+					json_t *json_egl_fbo_array = json_object_get(
+							value,
+							"egl_fbos");
+					json_t *json_egl_image_array = json_object_get(
+							value,
+							"egl_images");
+					json_t *json_buf_handle_array = json_object_get(
+							value,
+							"buf_handle_ptrs");
+					json_t *json_buf_type_array = json_object_get(
+							value,
+							"buf_types");
+					size_t i;
+					json_t *v;
+					if (json_texture_array) {
+						json_array_foreach(
+								json_texture_array,
+								i,
+								v)
+						{
+							json_t *json_tex_id = json_array_get(
+									json_texture_array,
+									i);
+							GLuint tex_id =
+								(GLuint)json_integer_value(
+										json_tex_id);
+							glDeleteTextures(
+									1,
+									&tex_id);
+						}
+					}
+					if (json_fbo_array) {
+						json_array_foreach(
+								json_fbo_array,
+								i,
+								v)
+						{
+							json_t *json_fbo_id = json_array_get(
+									json_fbo_array,
+									i);
+							GLuint fbo_id =
+								(GLuint)json_integer_value(
+										json_fbo_id);
+							glDeleteFramebuffers(1, &fbo_id);
+						}
+					}
+					if (json_egl_tex_array) {
+						json_array_foreach(
+								json_egl_tex_array,
+								i,
+								v)
+						{
+							json_t *json_egl_tex = json_array_get(
+									json_egl_tex_array,
+									i);
+							GLuint egl_tex_id =
+								(GLuint)json_integer_value(
+										json_egl_tex);
+							glDeleteTextures(
+									1,
+									&egl_tex_id);
+						}
+					}
+					if (json_egl_fbo_array) {
+						json_array_foreach(
+								json_egl_fbo_array,
+								i,
+								v)
+						{
+							json_t *json_egl_fbo = json_array_get(
+									json_egl_fbo_array,
+									i);
+							GLuint egl_fbo_id =
+								(GLuint)json_integer_value(
+										json_egl_fbo);
+							glDeleteFramebuffers(1, &egl_fbo_id);
+						}
+					}
+					if (json_buf_handle_array) {
+						json_array_foreach(
+								json_buf_handle_array,
+								i,
+								v)
+						{
+							json_t *json_buf_handle = json_array_get(
+									json_buf_handle_array,
+									i);
+							uintptr_t buf_handle = 0;
+							if (json_buf_handle) {
+								buf_handle = json_integer_value(json_buf_handle);
+							}
+							if (buf_handle != 0) {
+								json_t *json_buf_type = json_array_get(
+									json_buf_type_array,
+									i);
+								int buf_type = json_integer_value(json_buf_type);
+								if (buf_type == RVGPU_HARDWARE_BUFFER) {
+									json_t *json_egl_image = json_array_get(
+											json_egl_image_array,
+											i);
+									uintptr_t egl_image_ptr = (uintptr_t)json_integer_value(json_egl_image);
+									EGLImageKHR egl_image = (EGLImageKHR) egl_image_ptr;
+									if (egl_image != EGL_NO_IMAGE_KHR) {
+										EGLSyncKHR sync = eglCreateSyncKHR(egl->dpy, EGL_SYNC_FENCE_KHR, NULL);
+										eglClientWaitSyncKHR(egl->dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER_KHR);
+										eglDestroySyncKHR(egl->dpy, sync);
+										eglDestroyImageKHR(egl->dpy, egl_image);
+										egl_image = EGL_NO_IMAGE_KHR;
+									}
+									destroy_hardware_buffer(
+											(void *)buf_handle,
+											&pf_funcs);
+										if (json_egl_image_array) {
+											insert_integar_json_array_with_index(
+												json_egl_image_array,
+												i,
+												json_integer(0));
+										}
+										insert_integar_json_array_with_index(
+											json_buf_handle_array,
+												i,
+											json_integer(0));
+										insert_integar_json_array_with_index(
+											json_buf_type_array,
+												i,
+											json_integer(0));
+								} else if (buf_type == RVGPU_SOFTWARE_BUFFER) {
+									destroy_shared_buffer(
+											(void *)(uintptr_t)
+											buf_handle,
+											NULL,
+											&pf_funcs);
+										insert_integar_json_array_with_index(
+											json_buf_handle_array,
+												i,
+											json_integer(0));
+										insert_integar_json_array_with_index(
+											json_buf_type_array,
+												i,
+											json_integer(0));
+								}
+							}
+						}
+					}
+				}
 				event_id = RVGPU_REMOVE_EVENT_ID;
 			}
 
 			json_decref(json_obj);
 			json_object_set_new(json_cmd_obj, "event_id",
 					    json_integer(event_id));
-			json_object_set_new(json_cmd_obj, "rvgpu_surface_id",
-					    json_string(rvgpu_surface_id));
+			if (rvgpu_surface_id != NULL) {
+				json_object_set_new(json_cmd_obj, "rvgpu_surface_id",
+						    json_string(rvgpu_surface_id));
+			}
 			char *json_cmd =
 				json_dumps(json_cmd_obj, JSON_ENCODE_ANY);
 			json_decref(json_cmd_obj);
+			if (json_cmd == NULL) {
+				fprintf(stderr, "json_dumps failed\n");
+				break;
+			}
 			pthread_mutex_lock(rvgpu_request_mutex);
 			send_str_with_size(req_write_fd, json_cmd);
 			pthread_mutex_unlock(rvgpu_request_mutex);
+			free(json_cmd);
 			if (event_id == RVGPU_REMOVE_EVENT_ID) {
+				send_str_with_size(client_rvgpu_term_fd, "request thread done");
 				break;
 			}
 		}
+		
 	}
+	json_decref(rvgpu_texture_list);
 	close(client_rvgpu_fd);
+	close(client_rvgpu_control_fd);
+	close(client_rvgpu_sync_fd);
+	close(client_rvgpu_term_fd);
+	eglDestroyContext(egl->dpy, thread_ctx);
+	eglMakeCurrent(egl->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	free(params);
 	return NULL;
 }
@@ -575,6 +1126,7 @@ void *regislation_read_loop(void *arg)
 
 	struct rvgpu_domain_sock_params domain_params = params->domain_params;
 	pthread_mutex_t *rvgpu_request_mutex = params->rvgpu_request_mutex;
+	struct rvgpu_egl_state *egl = params->egl;
 	bool running = true;
 	int server_rvgpu_sock =
 		create_server_socket(domain_params.rvgpu_compositor_sock_path);
@@ -582,18 +1134,35 @@ void *regislation_read_loop(void *arg)
 		fprintf(stderr, "Failed to create server socket\n");
 		exit(EXIT_FAILURE);
 	}
+
 	while (running) {
 		struct rvgpu_request_params *req_params =
 			(struct rvgpu_request_params *)calloc(
 				1, sizeof(struct rvgpu_request_params));
 
+		req_params->egl = egl;
 		req_params->req_write_fd = params->req_write_fd;
-		req_params->client_rvgpu_fd =
-			connect_to_client(server_rvgpu_sock);
-		printf("connect_to_client req_params->client_rvgpu_fd: %d\n",
-		       req_params->client_rvgpu_fd);
-		if (req_params->client_rvgpu_fd < 0) {
+
+		int count = 0;
+		int *fds = connect_to_multiple_clients(server_rvgpu_sock, &count);
+		if (!fds) {
+			perror("connect_to_multiple_clients");
 			continue;
+		}
+
+		for (int i = 0; i < count; ++i) {
+			if (i == 0) {
+				req_params->client_rvgpu_fd = fds[i];
+			}
+			if (i == 1) {
+				req_params->client_rvgpu_control_fd = fds[i];
+			}
+			if (i == 2) {
+				req_params->client_rvgpu_sync_fd = fds[i];
+			}
+			if (i == 3) {
+				req_params->client_rvgpu_term_fd = fds[i];
+			}
 		}
 
 		struct pollfd read_pfd = { .fd = req_params->client_rvgpu_fd,
@@ -605,10 +1174,24 @@ void *regislation_read_loop(void *arg)
 				close(req_params->client_rvgpu_fd);
 				break;
 			}
+
 			if (read_pfd.revents & POLLIN) {
 				char *rvgpu_surface_id = recv_str_all(
 					req_params->client_rvgpu_fd);
+				if (rvgpu_surface_id == NULL) {
+					/* Connection error - cleanup and wait for next client */
+					perror("recv_str_all failed, disconnecting client");
+					close(req_params->client_rvgpu_fd);
+					close(req_params->client_rvgpu_control_fd);
+					close(req_params->client_rvgpu_sync_fd);
+					close(req_params->client_rvgpu_term_fd);
+					free(req_params);
+					break; /* Back to outer loop for next client */
+				}
+
 				if (strcmp(rvgpu_surface_id, "stop") == 0) {
+					/* Test/debug stop command - shutdown compositor */
+					free(rvgpu_surface_id);
 					int event_id = RVGPU_STOP_EVENT_ID;
 					json_t *json_obj = json_object();
 					json_object_set_new(
@@ -621,8 +1204,11 @@ void *regislation_read_loop(void *arg)
 							   json_add_cmd);
 					pthread_mutex_unlock(
 						rvgpu_request_mutex);
+					free(req_params);
 					running = false;
+					break;
 				} else {
+					/* Normal surface registration */
 					req_params->rvgpu_surface_id =
 						strdup(rvgpu_surface_id);
 					req_params->rvgpu_request_mutex =
@@ -656,6 +1242,9 @@ void compositor_render(struct compositor_params *params,
 	EGL_GET_PROC_ADDR(glEGLImageTargetRenderbufferStorageOES);
 	EGL_GET_PROC_ADDR(eglCreateImageKHR);
 	EGL_GET_PROC_ADDR(eglDestroyImageKHR);
+	EGL_GET_PROC_ADDR(eglCreateSyncKHR);
+	EGL_GET_PROC_ADDR(eglDestroySyncKHR);
+	EGL_GET_PROC_ADDR(eglClientWaitSyncKHR);
 	pf_funcs = (platform_funcs_t)params->pf_funcs;
 	void *egl_pf_init_params = params->egl_pf_init_params;
 	struct rvgpu_egl_params egl_params = params->egl_params;
@@ -699,6 +1288,7 @@ void compositor_render(struct compositor_params *params,
 							   rvgpu_layout_list,
 							   &surface_list_mutex,
 							   &layout_list_mutex };
+	main_egl->frame_count = 0;
 	main_egl->draw_list_params = &draw_list_params;
 
 	// Start Regislation Loop
@@ -706,6 +1296,7 @@ void compositor_render(struct compositor_params *params,
 	pthread_mutex_init(&rvgpu_request_mutex, NULL);
 	request_tp->event_fd = event_fd;
 	request_tp->rvgpu_request_mutex = &rvgpu_request_mutex;
+	request_tp->egl = main_egl;
 
 	pthread_t regislation_read_loop_thread;
 	ret = pthread_create(&regislation_read_loop_thread, NULL,
@@ -714,9 +1305,7 @@ void compositor_render(struct compositor_params *params,
 	eglMakeCurrent(main_egl->dpy, main_egl->sfc, main_egl->sfc,
 		       main_egl->context);
 	init_2d_renderer(width, height);
-	if (vsync) {
-		eglSwapInterval(main_egl->dpy, vsync ? 1 : 0);
-	}
+	eglSwapInterval(main_egl->dpy, 1);
 	if (!layout_params.use_rvgpu_layout_draw) {
 		glClearColor(((egl_params.clear_color >> 24) & 0xFF) / 255.0f,
 			     ((egl_params.clear_color >> 16) & 0xFF) / 255.0f,
@@ -769,7 +1358,6 @@ void compositor_render(struct compositor_params *params,
 	size_t index;
 	json_t *value;
 	while (running || json_array_size(rvgpu_surface_list) > 0) {
-		json_t *json_client_rvgpu_fd_array = json_array();
 		int event_num = 0;
 		int layout_event_num = 0;
 		int timeout_ms = -1;
@@ -785,11 +1373,10 @@ void compositor_render(struct compositor_params *params,
 				const char *rvgpu_surface_id;
 				int event_id;
 				int img_w, img_h;
-				int fd_index;
-				int need_update_fd;
-				uintptr_t buf_handle;
 				int initial_color = 0;
 				int scanout_id;
+				int shared_buffer_fd_index;
+				int composit_tex_id;
 				json_t *json_cmd_obj = recv_json(req_read_fd);
 
 				if (json_cmd_obj) {
@@ -803,11 +1390,16 @@ void compositor_render(struct compositor_params *params,
 					}
 					event_num++;
 					timeout_ms = 0;
+
 					if (event_id == RVGPU_ADD_EVENT_ID) {
 						pthread_mutex_lock(
 							&surface_list_mutex);
 						json_object_del(json_cmd_obj,
 								"event_id");
+						json_object_set_new(
+							json_cmd_obj,
+							"updated_indexes",
+							json_array());
 						json_array_append_new(
 							rvgpu_surface_list,
 							json_deep_copy(
@@ -816,6 +1408,7 @@ void compositor_render(struct compositor_params *params,
 						pthread_mutex_unlock(
 							&surface_list_mutex);
 						continue;
+
 					} else if (event_id ==
 						   RVGPU_DRAW_EVENT_ID) {
 						if (get_str_from_jsonobj(
@@ -839,26 +1432,6 @@ void compositor_render(struct compositor_params *params,
 						}
 						if (get_int_from_jsonobj(
 							    json_cmd_obj,
-							    "shared_buffer_fd_index",
-							    &fd_index) == -1) {
-							continue;
-						}
-						if (get_int_from_jsonobj(
-							    json_cmd_obj,
-							    "need_update_fd",
-							    &need_update_fd) ==
-						    -1) {
-							continue;
-						}
-						if (get_uintptr_from_jsonobj(
-							    json_cmd_obj,
-							    "buf_handle",
-							    &buf_handle) ==
-						    -1) {
-							continue;
-						}
-						if (get_int_from_jsonobj(
-							    json_cmd_obj,
 							    "initial_color",
 							    &initial_color) ==
 						    -1) {
@@ -871,6 +1444,67 @@ void compositor_render(struct compositor_params *params,
 						    -1) {
 							continue;
 						}
+						if (get_int_from_jsonobj(
+							    json_cmd_obj,
+							    "shared_buffer_fd_index",
+							    &shared_buffer_fd_index) ==
+						    -1) {
+							continue;
+						}
+						if (get_int_from_jsonobj(
+								json_cmd_obj,
+								"composit_tex_id",
+								&composit_tex_id) ==
+							-1) {
+							continue;
+						}
+
+						pthread_mutex_lock(&surface_list_mutex);
+						json_array_foreach(rvgpu_surface_list, index,
+								   value)
+						{
+							const char *ext_rvgpu_surface_id;
+							if (get_str_from_jsonobj(
+								    value, "rvgpu_surface_id",
+								    &ext_rvgpu_surface_id) ==
+							    -1) {
+								continue;
+							}
+							int ext_scanout_id;
+							if (get_int_from_jsonobj(
+								    value, "scanout_id",
+								    &ext_scanout_id) == -1) {
+								continue;
+							}
+							json_t *json_updated_index_array =
+								json_object_get(
+									value,
+									"updated_indexes");
+							if (strcmp(ext_rvgpu_surface_id,
+								   rvgpu_surface_id) == 0 &&
+							    ext_scanout_id == scanout_id) {
+								json_object_set(
+									value, "composit_tex_id",
+									json_integer(composit_tex_id));
+								json_object_set(
+									value, "width",
+									json_integer(img_w));
+								json_object_set(
+									value, "height",
+									json_integer(img_h));
+								json_object_set(
+									value, "initial_color",
+									json_integer(
+										initial_color));
+								json_array_append_new(
+									json_updated_index_array,
+									json_integer(
+										shared_buffer_fd_index));
+								break;
+							} //target surface
+						} //rvgpu surface for loop
+						pthread_mutex_unlock(&surface_list_mutex);
+
 					} else if (event_id ==
 						   RVGPU_REMOVE_EVENT_ID) {
 						if (get_str_from_jsonobj(
@@ -889,11 +1523,13 @@ void compositor_render(struct compositor_params *params,
 						pthread_mutex_unlock(
 							&surface_list_mutex);
 						continue;
+
 					} else if (event_id ==
 						   RVGPU_LAYOUT_EVENT_ID) {
 						layout_event = true;
 						layout_event_num++;
 						continue;
+
 					} else if (event_id ==
 						   RVGPU_STOP_EVENT_ID) {
 						running = false;
@@ -904,289 +1540,6 @@ void compositor_render(struct compositor_params *params,
 					}
 				}
 
-				pthread_mutex_lock(&surface_list_mutex);
-				json_array_foreach(rvgpu_surface_list, index,
-						   value)
-				{
-					const char *ext_rvgpu_surface_id;
-					if (get_str_from_jsonobj(
-						    value, "rvgpu_surface_id",
-						    &ext_rvgpu_surface_id) ==
-					    -1) {
-						continue;
-					}
-					int ext_scanout_id;
-					if (get_int_from_jsonobj(
-						    value, "scanout_id",
-						    &ext_scanout_id) == -1) {
-						continue;
-					}
-					if (strcmp(ext_rvgpu_surface_id,
-						   rvgpu_surface_id) == 0 &&
-					    ext_scanout_id == scanout_id) {
-						json_object_set(
-							value, "width",
-							json_integer(img_w));
-						json_object_set(
-							value, "height",
-							json_integer(img_h));
-						json_object_set(
-							value,
-							"shared_buffer_fd_index",
-							json_integer(fd_index));
-						json_object_set(
-							value, "initial_color",
-							json_integer(
-								initial_color));
-						int client_rvgpu_fd;
-						if (get_int_from_jsonobj(
-							    value,
-							    "client_rvgpu_fd",
-							    &client_rvgpu_fd) ==
-						    -1) {
-							continue;
-						}
-						json_array_append_new(
-							json_client_rvgpu_fd_array,
-							json_integer(
-								client_rvgpu_fd));
-
-						json_t *json_texture_array =
-							json_object_get(
-								value,
-								"textures");
-						json_t *json_fd_index_array =
-							json_object_get(
-								value,
-								"fd_indexs");
-						if (!int_value_in_json_array(
-							    json_fd_index_array,
-							    fd_index)) {
-							insert_integar_json_array_with_index(
-								json_fd_index_array,
-								fd_index,
-								json_integer(
-									fd_index));
-
-							GLuint tex_id;
-							glGenTextures(1,
-								      &tex_id);
-							glBindTexture(
-								GL_TEXTURE_2D,
-								tex_id);
-							glTexParameteri(
-								GL_TEXTURE_2D,
-								GL_TEXTURE_MIN_FILTER,
-								GL_LINEAR);
-							glTexParameteri(
-								GL_TEXTURE_2D,
-								GL_TEXTURE_MAG_FILTER,
-								GL_LINEAR);
-							glTexParameteri(
-								GL_TEXTURE_2D,
-								GL_TEXTURE_WRAP_S,
-								GL_CLAMP_TO_EDGE);
-							glTexParameteri(
-								GL_TEXTURE_2D,
-								GL_TEXTURE_WRAP_T,
-								GL_CLAMP_TO_EDGE);
-							glBindTexture(
-								GL_TEXTURE_2D,
-								0);
-							json_array_append_new(
-								json_texture_array,
-								json_integer(
-									tex_id));
-						}
-						if (main_egl->hardware_buffer_enabled &&
-						    need_update_fd) {
-							json_t *json_tex_id =
-								json_array_get(
-									json_texture_array,
-									fd_index);
-							GLuint tex_id = (GLuint)
-								json_integer_value(
-									json_tex_id);
-							json_t *json_buf_handle_array =
-								json_object_get(
-									value,
-									"buf_handles");
-							if (!json_buf_handle_array) {
-								json_buf_handle_array =
-									json_array();
-							}
-							json_t *json_pre_buf_handle =
-								json_array_get(
-									json_buf_handle_array,
-									fd_index);
-							if (json_pre_buf_handle) {
-								uintptr_t pre_buf_handle =
-									json_integer_value(
-										json_pre_buf_handle);
-								destroy_hardware_buffer(
-									(void *)pre_buf_handle,
-									&pf_funcs);
-							}
-							insert_integar_json_array_with_index(
-								json_buf_handle_array,
-								fd_index,
-								json_integer(
-									buf_handle));
-							json_object_set(
-								value,
-								"buf_handles",
-								json_buf_handle_array);
-							json_t *json_egl_image_array =
-								json_object_get(
-									value,
-									"egl_images");
-							if (!json_egl_image_array) {
-								json_egl_image_array =
-									json_array();
-								json_object_set_new(
-									value,
-									"egl_images",
-									json_egl_image_array);
-							}
-							json_t *json_egl_image =
-								json_array_get(
-									json_egl_image_array,
-									fd_index);
-
-							if (json_egl_image &&
-							    json_is_integer(
-								    json_egl_image)) {
-								uintptr_t egl_image_ptr =
-									(uintptr_t)json_integer_value(
-										json_egl_image);
-								EGLImageKHR pre_eglImage =
-									(EGLImageKHR)
-										egl_image_ptr;
-								if (pre_eglImage !=
-								    EGL_NO_IMAGE_KHR) {
-									eglDestroyImageKHR(
-										main_egl->dpy,
-										pre_eglImage);
-								}
-							}
-							EGLImageKHR eglImage = create_egl_image(
-								main_egl->dpy,
-								img_w, img_h,
-								(void *)buf_handle,
-								&pf_funcs);
-							insert_integar_json_array_with_index(
-								json_egl_image_array,
-								fd_index,
-								json_integer(
-									(uintptr_t)
-										eglImage));
-
-							glBindTexture(
-								GL_TEXTURE_2D,
-								tex_id);
-							glEGLImageTargetTexture2DOES(
-								GL_TEXTURE_2D,
-								eglImage);
-							printf("update dma buf Surface JSON Object: %s\n",
-							       json_dumps(value,
-									  0));
-						}
-
-						if (!main_egl->hardware_buffer_enabled) {
-							if (need_update_fd) {
-								json_t *json_buf_handle_array =
-									json_object_get(
-										value,
-										"buf_handles");
-								if (!json_buf_handle_array) {
-									json_buf_handle_array =
-										json_array();
-								}
-								json_t *json_pre_buf_handle =
-									json_array_get(
-										json_buf_handle_array,
-										fd_index);
-								if (json_pre_buf_handle) {
-									int pre_buf_handle =
-										json_integer_value(
-											json_pre_buf_handle);
-									destroy_shared_buffer(
-										(void *)(uintptr_t)
-											pre_buf_handle,
-										NULL,
-										&pf_funcs);
-								}
-								insert_integar_json_array_with_index(
-									json_buf_handle_array,
-									fd_index,
-									json_integer(
-										buf_handle));
-								json_object_set(
-									value,
-									"buf_handles",
-									json_buf_handle_array);
-							}
-
-							json_t *json_buf_handle_array =
-								json_object_get(
-									value,
-									"buf_handles");
-							json_t *json_buf_handle =
-								json_array_get(
-									json_buf_handle_array,
-									fd_index);
-							buf_handle = (int)json_integer_value(
-								json_buf_handle);
-							void *shm_buffer_ptr = mmap(
-								NULL,
-								img_w * img_h *
-									4,
-								PROT_READ,
-								MAP_SHARED,
-								(int)(uintptr_t)
-									buf_handle,
-								0);
-							if (shm_buffer_ptr ==
-							    MAP_FAILED) {
-								perror("mmap");
-							}
-
-							json_t *json_tex_id =
-								json_array_get(
-									json_texture_array,
-									fd_index);
-							if (json_is_integer(
-								    json_tex_id)) {
-								GLuint tex_id =
-									(GLuint)json_integer_value(
-										json_tex_id);
-								glBindTexture(
-									GL_TEXTURE_2D,
-									tex_id);
-
-								glTexImage2D(
-									GL_TEXTURE_2D,
-									0,
-									GL_RGBA,
-									img_w,
-									img_h,
-									0,
-									GL_RGBA,
-									GL_UNSIGNED_BYTE,
-									shm_buffer_ptr);
-
-								glBindTexture(
-									GL_TEXTURE_2D,
-									0);
-							}
-							munmap(shm_buffer_ptr,
-							       img_w * img_h *
-								       4);
-						}
-						break;
-					} //target surface
-				} //rvgpu surface for loop
-				pthread_mutex_unlock(&surface_list_mutex);
 			} else {
 				//no pollin event
 				if (event_num > 0) {
@@ -1197,6 +1550,59 @@ void compositor_render(struct compositor_params *params,
 
 		struct timespec start;
 		clock_gettime(CLOCK_MONOTONIC, &start);
+
+		json_array_foreach(rvgpu_surface_list, index, value)
+		{
+			json_t *json_updated_index_array =
+				json_object_get(value, "updated_indexes");
+			int client_rvgpu_sync_fd;
+			if (get_int_from_jsonobj(value, "client_rvgpu_sync_fd",
+						 &client_rvgpu_sync_fd) == -1) {
+				continue;
+			}
+			const char *rvgpu_surface_id;
+			get_str_from_jsonobj(value, "rvgpu_surface_id",
+					     &rvgpu_surface_id);
+
+			if (json_is_array(json_updated_index_array)) {
+				size_t size = json_array_size(
+					json_updated_index_array);
+				if (size > 1) {
+					json_t *skipped_index_array =
+						json_array();
+					for (size_t i = 0; i < size - 1; i++) {
+						json_t *skipped_index_json =
+							json_array_get(
+								json_updated_index_array,
+								i);
+						if (skipped_index_json) {
+							json_array_append_new(
+								skipped_index_array,
+								json_deep_copy(
+									skipped_index_json));
+						}
+					}
+					json_t *swap_complete_obj =
+						json_deep_copy(value);
+					json_object_set_new(
+						swap_complete_obj,
+						"updated_indexes",
+						skipped_index_array);
+					char *swap_complete_str =
+						json_dumps(swap_complete_obj,
+							   JSON_ENCODE_ANY);
+					send_str_with_size(client_rvgpu_sync_fd,
+							   swap_complete_str);
+					for (size_t i = 0; i < size - 1; i++) {
+						json_array_remove(
+							json_updated_index_array,
+							0);
+					}
+					json_decref(skipped_index_array);
+					json_decref(swap_complete_obj);
+				}
+			}
+		}
 
 		//draw all surfaces using texture
 		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1328,8 +1734,8 @@ void compositor_render(struct compositor_params *params,
 				}
 				int need_draw = 0;
 				int initial_color = 0;
+				int composit_tex_id;
 				int img_w, img_h;
-				int fd_index;
 				GLuint texture_id;
 				pthread_mutex_lock(&surface_list_mutex);
 				json_array_foreach(rvgpu_surface_list, index,
@@ -1351,6 +1757,10 @@ void compositor_render(struct compositor_params *params,
 					if (strcmp(ext_rvgpu_surface_id,
 						   rvgpu_surface_id) == 0 &&
 					    ext_scanout_id == scanout_id) {
+						if (get_int_from_jsonobj(value, "composit_tex_id",
+									&composit_tex_id) == -1) {
+							continue;
+						}
 						if (get_int_from_jsonobj(
 							    value, "width",
 							    &img_w) == -1) {
@@ -1359,12 +1769,6 @@ void compositor_render(struct compositor_params *params,
 						if (get_int_from_jsonobj(
 							    value, "height",
 							    &img_h) == -1) {
-							continue;
-						}
-						if (get_int_from_jsonobj(
-							    value,
-							    "shared_buffer_fd_index",
-							    &fd_index) == -1) {
 							continue;
 						}
 						if (get_int_from_jsonobj(
@@ -1380,18 +1784,11 @@ void compositor_render(struct compositor_params *params,
 						    -1) {
 							continue;
 						}
-						json_t *json_texture_array =
-							json_object_get(
-								value,
-								"textures");
-						json_t *json_tex_id =
-							json_array_get(
-								json_texture_array,
-								fd_index);
-						texture_id = (GLuint)
-							json_integer_value(
-								json_tex_id);
+						texture_id = (GLuint) composit_tex_id;
 						need_draw = 1;
+#if 0
+						printf("Draw JSON Object %zu: %s\n", index, json_dumps(value, 0));
+#endif
 						break;
 					}
 				}
@@ -1472,10 +1869,10 @@ void compositor_render(struct compositor_params *params,
 						dst_y, dst_w, dst_h, 0);
 					draw_num++;
 #if 0
-                                        printf("draw_2d_texture_layout layout_id: %d, rvgpu_surface_id: %s, scanout_id: %d, img_w: %d, img_h: %d src_x: %.3f, src_y: %.3f, src_w: %.3f, src_h: %.3f, dst_x: %.3f, dst_y: %.3f, dst_w: %.3f, dst_h: %.3f\n",
-                                                        layout_id, rvgpu_surface_id, scanout_id, img_w, img_h,
-                                                        src_x, src_y, src_w, src_h,
-                                                        dst_x, dst_y, dst_w, dst_h);
+					printf("draw_2d_texture_layout layout_id: %d, rvgpu_surface_id: %s, scanout_id: %d, img_w: %d, img_h: %d src_x: %.3f, src_y: %.3f, src_w: %.3f, src_h: %.3f, dst_x: %.3f, dst_y: %.3f, dst_w: %.3f, dst_h: %.3f\n",
+							layout_id, rvgpu_surface_id, scanout_id, img_w, img_h,
+							src_x, src_y, src_w, src_h,
+							dst_x, dst_y, dst_w, dst_h);
 #endif
 				}
 			}
@@ -1483,9 +1880,12 @@ void compositor_render(struct compositor_params *params,
 		} else {
 			json_array_foreach(rvgpu_surface_list, index, value)
 			{
+				int composit_tex_id;
 				int img_w, img_h;
-				int fd_index;
-				GLuint texture_id;
+				if (get_int_from_jsonobj(value, "composit_tex_id",
+							 &composit_tex_id) == -1) {
+					continue;
+				}
 				if (get_int_from_jsonobj(value, "width",
 							 &img_w) == -1) {
 					continue;
@@ -1494,18 +1894,7 @@ void compositor_render(struct compositor_params *params,
 							 &img_h) == -1) {
 					continue;
 				}
-				if (get_int_from_jsonobj(
-					    value, "shared_buffer_fd_index",
-					    &fd_index) == -1) {
-					continue;
-				}
-				json_t *json_texture_array =
-					json_object_get(value, "textures");
-				json_t *json_tex_id = json_array_get(
-					json_texture_array, fd_index);
-				texture_id =
-					(GLuint)json_integer_value(json_tex_id);
-				draw_2d_texture_layout(texture_id, img_w, img_h,
+				draw_2d_texture_layout((GLuint)composit_tex_id, img_w, img_h,
 						       0, 0, img_w, img_h, 0, 0,
 						       img_w, img_h, 0);
 				draw_num++;
@@ -1516,7 +1905,7 @@ void compositor_render(struct compositor_params *params,
 		}
 
 		rvgpu_pf_swap(main_egl, vsync, &pf_funcs);
-
+		main_egl->frame_count++;
 		if (layout_params.use_layout_sync && layout_event) {
 			pthread_mutex_lock(&layout_sync_mutex);
 			layout_status = LAYOUT_COMPLETED;
@@ -1524,6 +1913,28 @@ void compositor_render(struct compositor_params *params,
 			pthread_mutex_unlock(&layout_sync_mutex);
 		}
 
+		json_array_foreach(rvgpu_surface_list, index, value)
+		{
+			char *swap_complete_str =
+				json_dumps(value, JSON_ENCODE_ANY);
+			json_t *json_updated_index_array =
+				json_object_get(value, "updated_indexes");
+			int client_rvgpu_sync_fd;
+			if (get_int_from_jsonobj(value, "client_rvgpu_sync_fd",
+						 &client_rvgpu_sync_fd) == -1) {
+				continue;
+			}
+			if (json_is_array(json_updated_index_array)) {
+				size_t size = json_array_size(
+					json_updated_index_array);
+				if (size > 0) {
+					send_str_with_size(client_rvgpu_sync_fd,
+							   swap_complete_str);
+					json_array_clear(
+						json_updated_index_array);
+				}
+			}
+		}
 #if 0
 		static uint32_t swap_cnt;
 		static double total_time;
@@ -1725,6 +2136,7 @@ static void *rvgpu_input_event_loop(void *arg)
 #if 0
 			char *json_str = json_dumps(json_obj, JSON_ENCODE_ANY);
 			printf("rvgpu_input_event_loop json_str: %s\n", json_str);
+			free(json_str);
 #endif
 		}
 	}
@@ -1743,6 +2155,7 @@ void rvgpu_frame_sync_wait(double frame_rate, double *last_frame_time)
 	double elapsed_ms = current_get_time_ms() - *last_frame_time;
 	double sleep_ms = 1000.0 / frame_rate - elapsed_ms;
 	if (sleep_ms > 0) {
+		// fprintf(stderr, "rvgpu_frame_sync_wait sleep_ms: %f, elapsed_ms: %f\n", sleep_ms, elapsed_ms);
 		struct timespec req, rem;
 		req.tv_sec = (time_t)(sleep_ms / 1000);
 		req.tv_nsec = (long)((sleep_ms - req.tv_sec * 1000) * 1e6);
@@ -1752,12 +2165,81 @@ void rvgpu_frame_sync_wait(double frame_rate, double *last_frame_time)
 	*last_frame_time = current_get_time_ms();
 }
 
+void *swap_completed_loop(void *arg)
+{
+	struct rvgpu_egl_state *egl = (struct rvgpu_egl_state *)arg;
+	struct pollfd pfd = { .fd = egl->server_rvgpu_sync_fd,
+			      .events = POLLIN };
+	size_t index;
+	json_t *value;
+	while (1) {
+		int ret = poll(&pfd, 1, -1);
+		if (ret == -1) {
+			perror("rvgpu_input_event_loop poll");
+			break;
+		}
+		if (pfd.revents & POLLNVAL) {
+			break;
+		}
+		if (pfd.revents & (POLLHUP | POLLERR)) {
+			break;
+		}
+		if (pfd.revents & POLLIN) {
+			json_t *swap_completed_cmd =
+				recv_json(egl->server_rvgpu_sync_fd);
+			if (!swap_completed_cmd)
+				break;
+			const char *rvgpu_surface_id;
+			get_str_from_jsonobj(swap_completed_cmd,
+					     "rvgpu_surface_id",
+					     &rvgpu_surface_id);
+			int scanout_id;
+			if (get_int_from_jsonobj(swap_completed_cmd,
+						 "scanout_id",
+						 &scanout_id) == -1) {
+				continue;
+			}
+			json_t *json_updated_index_array = json_object_get(
+				swap_completed_cmd, "updated_indexes");
+			if (json_is_array(json_updated_index_array)) {
+				struct rvgpu_scanout *s =
+					&egl->scanouts[scanout_id];
+				pthread_mutex_lock(
+					s->buf_state->swap_sync_mutex);
+				json_array_foreach(json_updated_index_array,
+						   index, value)
+				{
+					if (json_is_integer(value)) {
+						int idx =
+							(int)json_integer_value(
+								value);
+						s->buf_state
+							->composit_status[idx] =
+							0;
+					}
+				}
+				pthread_cond_signal(
+					s->buf_state->swap_sync_cond);
+				pthread_mutex_unlock(
+					s->buf_state->swap_sync_mutex);
+			}
+#if 0
+		    printf("swap_completed_loop swap_completed_cmd: rvgpu_surface_id: %s, scanout_id: %d, %s\n", rvgpu_surface_id, scanout_id, json_dumps(json_updated_index_array, 0));
+#endif
+		}
+	}
+	return NULL;
+}
+
 void rvgpu_render(struct render_params *params)
 {
 	EGL_GET_PROC_ADDR(glEGLImageTargetTexture2DOES);
 	EGL_GET_PROC_ADDR(glEGLImageTargetRenderbufferStorageOES);
 	EGL_GET_PROC_ADDR(eglCreateImageKHR);
 	EGL_GET_PROC_ADDR(eglDestroyImageKHR);
+	EGL_GET_PROC_ADDR(eglCreateSyncKHR);
+	EGL_GET_PROC_ADDR(eglDestroySyncKHR);
+	EGL_GET_PROC_ADDR(eglClientWaitSyncKHR);
 	pf_funcs = (platform_funcs_t)params->pf_funcs;
 	int command_socket = params->command_socket;
 	int resource_socket = params->resource_socket;
@@ -1771,15 +2253,26 @@ void rvgpu_render(struct render_params *params)
 	struct rvgpu_domain_sock_params domain_params = params->domain_params;
 	fprintf(stderr, "rvgpu_compositor_sock_path: %s\n",
 		domain_params.rvgpu_compositor_sock_path);
-	int server_rvgpu_fd =
-		connect_to_server(domain_params.rvgpu_compositor_sock_path);
 	struct rvgpu_fps_params fps_params = params->fps_params;
-	printf("connect_to_server server_rvgpu_fd: %d\n", server_rvgpu_fd);
-	if (server_rvgpu_fd < 0) {
+
+	int num = 4;
+	int *fds = NULL;
+	/* Retry connection to compositor socket with timeout (wait for parent to create socket) */
+	for (int retry = 0; retry < 50; retry++) {
+		fds = multiple_connects_to_server(domain_params.rvgpu_compositor_sock_path, num);
+		if (fds)
+			break;
+		usleep(100000); /* 100ms */
+	}
+	if (!fds) {
 		fprintf(stderr, "Failed to connect to server\n");
 		return;
 	}
 
+	int server_rvgpu_fd = fds[0];
+	int server_rvgpu_control_fd = fds[1];
+	int server_rvgpu_sync_fd = fds[2];
+	int server_rvgpu_term_fd = fds[3];
 	send_str_with_size(server_rvgpu_fd, rvgpu_surface_id);
 	int ret;
 	recv_int(server_rvgpu_fd, &ret);
@@ -1788,6 +2281,7 @@ void rvgpu_render(struct render_params *params)
 		close(server_rvgpu_fd);
 		return;
 	}
+
 
 	void *offscreen_display;
 	if (carddev != NULL) {
@@ -1803,6 +2297,8 @@ void rvgpu_render(struct render_params *params)
 		get_hardware_buffer_cap(egl->dpy, &pf_funcs);
 	egl->rvgpu_surface_id = rvgpu_surface_id;
 	egl->server_rvgpu_fd = server_rvgpu_fd;
+	egl->server_rvgpu_control_fd = server_rvgpu_control_fd;
+	egl->server_rvgpu_sync_fd = server_rvgpu_sync_fd;
 	egl->egl_params = egl_params;
 
 	struct rvgpu_scanout_params sp[VIRTIO_GPU_MAX_SCANOUTS];
@@ -1816,6 +2312,10 @@ void rvgpu_render(struct render_params *params)
 	struct rvgpu_pr_state *pr =
 		rvgpu_pr_init(egl, &pp, command_socket, resource_socket);
 
+	pthread_mutex_t swap_sync_mutex;
+	pthread_mutex_init(&swap_sync_mutex, NULL);
+	pthread_cond_t swap_sync_cond;
+	pthread_cond_init(&swap_sync_cond, NULL);
 	json_t *add_scanout_json_obj = json_object();
 	json_object_set_new(add_scanout_json_obj, "event_id",
 			    json_integer(RVGPU_ADD_EVENT_ID));
@@ -1827,6 +2327,13 @@ void rvgpu_render(struct render_params *params)
 		s->params = sp[i];
 		if (sp[i].enabled) {
 			egl->cb->create_scanout(egl, &egl->scanouts[i]);
+			// Override plane_buffer_count  between renderer and compositor (default is 2)
+#if 0
+			//ToDo: should be set plane_buffer_count using proxy option
+			s->buf_state->plane_buffer_count = 1;
+#endif
+			s->buf_state->swap_sync_mutex = &swap_sync_mutex;
+			s->buf_state->swap_sync_cond = &swap_sync_cond;
 			if (fps_params.show_fps) {
 				s->fps_params = fps_params;
 				s->fps_params.rvgpu_laptime_ms =
@@ -1837,15 +2344,20 @@ void rvgpu_render(struct render_params *params)
 					    json_integer(s->scanout_id));
 			add_scanout_json_str = json_dumps(add_scanout_json_obj,
 							  JSON_ENCODE_ANY);
-			send_str_with_size(server_rvgpu_fd,
+			send_str_with_size(server_rvgpu_control_fd,
 					   add_scanout_json_str);
 			if (layout_params.use_rvgpu_layout_draw) {
 				// Initialize the background color for each rvgpu-proxy.
 				rvgpu_egl_draw(egl, &egl->scanouts[i], vsync);
 			}
+			//only use scanout 0
+			break;
 		}
 	}
 	json_decref(add_scanout_json_obj);
+	pthread_t swap_completed_loop_thread;
+	pthread_create(&swap_completed_loop_thread, NULL, swap_completed_loop,
+		       egl);
 
 	struct input_event_thread_params *input_params =
 		(struct input_event_thread_params *)calloc(
@@ -1873,12 +2385,22 @@ void rvgpu_render(struct render_params *params)
 	json_str = json_dumps(json_cmd_obj, JSON_ENCODE_ANY);
 	send_str_with_size(egl->server_rvgpu_fd, json_str);
 
+	pthread_cond_destroy(&swap_sync_cond);
+	pthread_mutex_destroy(&swap_sync_mutex);
 	rvgpu_pr_free(pr);
 	rvgpu_egl_free(egl);
 	rvgpu_destroy_pf_native_display(offscreen_display, &pf_funcs);
 	close(server_rvgpu_fd);
+	close(server_rvgpu_control_fd);
+	close(server_rvgpu_sync_fd);
 	free(egl);
 	free(input_params);
+	// Wait for the request event loop to terminate
+	char *msg = recv_str_all(server_rvgpu_term_fd);
+	if(msg != NULL) {
+		free(msg);
+	}
+	close(server_rvgpu_term_fd);
 }
 
 void *rvgpu_egl_pf_init(void *egl_pf_init_params, uint32_t *width,

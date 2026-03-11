@@ -24,5 +24,9 @@
 int create_server_socket(const char *domain);
 int connect_to_client(int socket);
 int connect_to_server(char *domain);
+void send_handle(int client_fd, void *handle);
+void *recv_handle(int client_fd);
+int *multiple_connects_to_server(const char *domain, int num_fds);
+int *connect_to_multiple_clients(int server_socket_fd, int *out_count);
 
 #endif /* RVGPU_CONNECTION_H */

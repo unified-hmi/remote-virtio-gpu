@@ -17,13 +17,66 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/un.h>
+#include <rvgpu-utils/rvgpu-utils.h>
+
+void send_handle(int client_fd, void *handle)
+{
+	struct msghdr msg = { 0 };
+	char buf[CMSG_SPACE(sizeof(void *))];
+	memset(buf, 0, sizeof(buf));
+
+	struct iovec io = { .iov_base = (void *)"", .iov_len = 1 };
+
+	msg.msg_iov = &io;
+	msg.msg_iovlen = 1;
+	msg.msg_control = buf;
+	msg.msg_controllen = sizeof(buf);
+
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(void *));
+
+	*((void **)CMSG_DATA(cmsg)) = handle;
+
+	if (sendmsg(client_fd, &msg, 0) == -1)
+		perror("sendmsg");
+}
+
+void *recv_handle(int client_fd)
+{
+	struct msghdr msg = { 0 };
+
+	char m_buffer[1];
+	struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
+
+	msg.msg_iov = &io;
+	msg.msg_iovlen = 1;
+
+	char buf[CMSG_SPACE(sizeof(void *))];
+	msg.msg_control = buf;
+	msg.msg_controllen = sizeof(buf);
+
+	if (recvmsg(client_fd, &msg, 0) == -1) {
+		perror("recvmsg");
+		return NULL;
+	}
+
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+
+	void *handle = *((void **)CMSG_DATA(cmsg));
+
+	return handle;
+}
 
 int create_server_socket(const char *domain)
 {
@@ -103,4 +156,91 @@ int connect_to_server(const char *domain)
 	}
 
 	return sock;
+}
+
+static void close_fd_array(int *fds, size_t count)
+{
+	if (!fds)
+		return;
+	for (size_t i = 0; i < count; ++i) {
+		if (fds[i] >= 0)
+			close(fds[i]);
+	}
+}
+
+int *multiple_connects_to_server(const char *domain, int num_fds)
+{
+	if (!domain || num_fds <= 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	int *fds = (int *)calloc((size_t)num_fds, sizeof(int));
+	if (!fds)
+		return NULL;
+	for (int i = 0; i < num_fds; ++i)
+		fds[i] = -1;
+
+	fds[0] = connect_to_server(domain);
+	if (fds[0] < 0) {
+		free(fds);
+		return NULL;
+	}
+
+	if (send_int(fds[0], num_fds) < 0) {
+		close(fds[0]);
+		free(fds);
+		return NULL;
+	}
+
+	for (int i = 1; i < num_fds; ++i) {
+		fds[i] = connect_to_server(domain);
+		if (fds[i] < 0) {
+			close_fd_array(fds, (size_t)i);
+			free(fds);
+			return NULL;
+		}
+	}
+	return fds;
+}
+
+int *connect_to_multiple_clients(int server_socket_fd, int *out_count)
+{
+	if (server_socket_fd < 0 || !out_count) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	int fd0 = connect_to_client(server_socket_fd);
+	if (fd0 < 0)
+		return NULL;
+
+	int num_fds = 0;
+	if (recv_int(fd0, &num_fds) < 0 || num_fds <= 0) {
+		close(fd0);
+		errno = (num_fds <= 0) ? EINVAL : errno;
+		return NULL;
+	}
+
+	int *fds = (int *)calloc((size_t)num_fds, sizeof(int));
+	if (!fds) {
+		close(fd0);
+		return NULL;
+	}
+	for (int i = 0; i < num_fds; ++i)
+		fds[i] = -1;
+	fds[0] = fd0;
+
+	for (int i = 1; i < num_fds; ++i) {
+		int fd = connect_to_client(server_socket_fd);
+		if (fd < 0) {
+			close_fd_array(fds, (size_t)i);
+			free(fds);
+			return NULL;
+		}
+		fds[i] = fd;
+	}
+
+	*out_count = num_fds;
+	return fds;
 }
