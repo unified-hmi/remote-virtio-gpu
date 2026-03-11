@@ -19,6 +19,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
 
 #include <netdb.h>
@@ -75,19 +77,19 @@ static int reconnect_next(struct conninfo *ci)
 		       sizeof(int)) != 0)
 		err(1, "setsockopt SO_KEEPALIVE");
 
-	int keepidle = 1;
+	int keepidle = 30;
 
 	if (setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &keepidle,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPIDLE");
 
-	int keepintvl = 1;
+	int keepintvl = 10;
 
 	if (setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl,
 		       sizeof(int)) != 0)
 		err(1, "setsockopt TCP_KEEPINTVL");
 
-	int keepcnt = 1;
+	int keepcnt = 10;
 
 	if (setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &keepcnt,
 		       sizeof(int)) != 0)
@@ -100,13 +102,15 @@ static int reconnect_next(struct conninfo *ci)
 		err(1, "setsockopt TCP_NODELAY");
 	}
 
-	if (connect(fd, ci->p->ai_addr, ci->p->ai_addrlen) != -1 ||
-	    errno != EINPROGRESS) {
-		close(fd);
-		fd = -1;
-	}
+	int rc = connect(fd, ci->p->ai_addr, ci->p->ai_addrlen);
+	if (rc == 0)
+		return fd;
 
-	return fd;
+	if (rc == -1 && errno == EINPROGRESS)
+		return fd;
+
+	close(fd);
+	return -1;
 }
 
 static int wait_scanouts_init(struct ctx_priv *ctx)
@@ -358,9 +362,14 @@ static void handle_reset(struct rvgpu_ctx *ctx, struct vgpu_host *vhost[],
 	if (ctx_priv->gpu_reset_cb)
 		ctx_priv->gpu_reset_cb(ctx, GPU_RESET_NONE);
 	/*
-	 * FIXME: Without this delay, rvgpu-proxy will not
-	 * wait for subscriber creation in rvgpu-renderer. This
-	 * may lead rvgpu-renderer to miss resources from rvgpu-proxy.
+	 * TODO: This delay is a workaround for a synchronization issue.
+	 * After reconnection, rvgpu-renderer needs time to create subscribers
+	 * before rvgpu-proxy starts sending resources. Without this delay,
+	 * rvgpu-renderer may miss initial resources.
+	 *
+	 * Proper fix requires a handshake protocol where rvgpu-renderer
+	 * sends a "ready" message after subscriber creation, and rvgpu-proxy
+	 * waits for this acknowledgment before resuming operations.
 	 */
 	usleep(100 * 1000);
 	rvgpu_ctx_wakeup(ctx_priv);
@@ -494,10 +503,57 @@ static unsigned int set_pfd(struct ctx_priv *ctx, struct vgpu_host *vhost[],
 	return pfd_count;
 }
 
+/**
+ * Check if socket connection is closed during normal data reception.
+ * Returns true if connection was lost and shutdown was triggered.
+ */
+static bool check_connection_closed(int fd, struct ctx_priv *ctx_priv)
+{
+	if (fd < 0)
+		return false;
+
+	char buf;
+	int ret = recv(fd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
+	if (ret == 0) {
+		/* Graceful shutdown by peer */
+		warnx("rvgpu-renderer closed connection");
+		ctx_priv->interrupted = true;
+		kill(getpid(), SIGTERM);
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Handle connection error events (POLLERR/POLLHUP/POLLNVAL).
+ */
+static void handle_connection_error(struct ctx_priv *ctx_priv, const char *desc)
+{
+	warnx("rvgpu-renderer connection error: %s", desc);
+	ctx_priv->interrupted = true;
+	kill(getpid(), SIGTERM);
+}
+
 static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 		   int cmd_count, int res_count)
 {
 	struct ctx_priv *ctx_priv = (struct ctx_priv *)ctx->priv;
+
+	/* Check for connection errors (POLLHUP/POLLERR/POLLNVAL) */
+	for (int i = 0; i < cmd_count; i++) {
+		if (p_entry->cmd_host[i].revents &
+		    (POLLHUP | POLLERR | POLLNVAL)) {
+			handle_connection_error(ctx_priv, "cmd socket");
+			return;
+		}
+	}
+	for (int i = 0; i < res_count; i++) {
+		if (p_entry->res_host[i].revents &
+		    (POLLHUP | POLLERR | POLLNVAL)) {
+			handle_connection_error(ctx_priv, "res socket");
+			return;
+		}
+	}
 
 	/* Handle Virtio-GPU commands */
 	for (int i = 0; i < cmd_count; i++) {
@@ -517,8 +573,13 @@ static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 	}
 
 	for (int i = 0; i < cmd_count; i++) {
+		int fd = p_entry->cmd_host[i].fd;
+		if (fd < 0)
+			continue;
 		if (p_entry->cmd_host[i].revents & POLLIN) {
-			splice(p_entry->cmd_host[i].fd, NULL,
+			if (check_connection_closed(fd, ctx_priv))
+				return;
+			splice(fd, NULL,
 			       ctx_priv->cmd[i].host_p[PIPE_WRITE], NULL,
 			       PIPE_SIZE, 0);
 		}
@@ -542,8 +603,13 @@ static void in_out_events(struct rvgpu_ctx *ctx, struct poll_entries *p_entry,
 	}
 
 	for (int i = 0; i < res_count; i++) {
+		int fd = p_entry->res_host[i].fd;
+		if (fd < 0)
+			continue;
 		if (p_entry->res_host[i].revents & POLLIN) {
-			splice(p_entry->res_host[i].fd, NULL,
+			if (check_connection_closed(fd, ctx_priv))
+				return;
+			splice(fd, NULL,
 			       ctx_priv->res[i].host_p[PIPE_WRITE], NULL,
 			       PIPE_SIZE, 0);
 		}
@@ -586,8 +652,20 @@ void *thread_conn_tcp(void *arg)
 	unsigned int host_count = ctx_priv->cmd_count + ctx_priv->res_count;
 
 	while (!ctx_priv->interrupted) {
-		/* Poll for timers, hosts and input pipes */
-		poll(pfd, pfd_count, -1);
+		/*
+		 * Poll indefinitely: Connection errors are detected via
+		 * POLLERR/POLLHUP/POLLNVAL events. Interrupted by signals
+		 * (EINTR).
+		 */
+		int poll_ret = poll(pfd, pfd_count, -1);
+		if (poll_ret < 0) {
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+
+		if (ctx_priv->interrupted)
+			break;
 
 		/* Check for hung sessions */
 		if (p_entry.ses_timer->revents == POLLIN) {
