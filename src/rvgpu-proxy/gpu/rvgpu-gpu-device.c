@@ -43,6 +43,7 @@
 
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu-protocol.h>
+#include <librvgpu/rvgpu-virgl-format.h>
 #include <libudev.h>
 
 #include <rvgpu-generic/rvgpu-capset.h>
@@ -366,8 +367,6 @@ static void gpu_capset_init(struct gpu_device *g, int capset)
 	for (i = 0u; i < GPU_MAX_CAPDATA; i++) {
 		struct gpu_capdata *c = &g->capdata[i];
 
-		while (1) {
-
 			if (read(capset, &c->hdr, sizeof(c->hdr)) !=
 			    (ssize_t)sizeof(c->hdr))
 				goto done;
@@ -382,10 +381,6 @@ static void gpu_capset_init(struct gpu_device *g, int capset)
 				warn("cannot read capset data");
 				goto done;
 			}
-
-			if (c->hdr.id == 1)
-				break;
-		}
 	}
 
 done:
@@ -511,7 +506,6 @@ static void read_from_pipe(struct rvgpu_scanout *s, char *buf, size_t size)
 			err(1, "Buffer overflow");
 	}
 }
-
 static void resource_update(struct rvgpu_scanout *s, const struct iovec iovs[],
 			    size_t niov, size_t skip, size_t length)
 {
@@ -530,10 +524,9 @@ static void resource_update(struct rvgpu_scanout *s, const struct iovec iovs[],
 		}
 	}
 }
-
 static void resource_transfer(struct gpu_device *g, struct rvgpu_scanout *s)
 {
-	struct rvgpu_header header = {0, 0, 0};
+	struct rvgpu_header header = {0, 0, 0, 0, 0};
 	struct rvgpu_patch patch = {0, 0, 0};
 	struct virtio_gpu_transfer_host_3d t;
 	struct rvgpu_res *res;
@@ -554,9 +547,68 @@ static void resource_transfer(struct gpu_device *g, struct rvgpu_scanout *s)
 			t.resource_id, res);
 		return;
 	}
+	if (t.box.w == res->info.width && t.box.h == res->info.height) {
+		resource_update(s, res->backing, res->nbacking, patch.offset,
+		patch.len);
+	}else {
 
-	resource_update(s, res->backing, res->nbacking, patch.offset,
-			patch.len);
+		// Another cases
+		uint32_t width = res->info.width >> t.level;
+		uint32_t bpp = get_format_bpp(res->info.format);
+		uint32_t stride = (t.stride != 0) ?
+						t.stride :
+						bpp *width;
+		char *res_data = malloc(patch.len);
+		if (!res_data) {
+			fprintf(stderr, "failed to allocate memory for resource transfer\n");
+			return;
+		}
+		read_from_pipe(s, res_data, patch.len);
+
+		uint32_t iov_index = 0u;
+		size_t backing_base = 0u;
+		for (uint32_t line = 0; line < t.box.h; line++) {
+			size_t pos = patch.offset + ((size_t)line * stride);
+			size_t res_data_pos = ((size_t)line * stride);
+			size_t line_len = t.box.w*bpp;
+			/* Find the iov containing the current line start */
+			while (iov_index < res->nbacking) {
+				const struct iovec *iov = &res->backing[iov_index];
+				size_t iov_end = backing_base + iov->iov_len;
+				if (pos < iov_end)
+					break;
+				backing_base = iov_end;
+				iov_index++;
+			}
+
+			size_t copied = 0u;
+			while (iov_index < res->nbacking && line_len > 0u) {
+				const struct iovec *iov = &res->backing[iov_index];
+				size_t iov_end = backing_base + iov->iov_len;
+				size_t offset = pos - backing_base;
+				size_t chunk = iov->iov_len - offset;
+				if (chunk > line_len)
+					chunk = line_len;
+				memcpy((char *)iov->iov_base + offset, res_data + res_data_pos + copied, chunk);
+				pos += chunk;
+				line_len -= chunk;
+				copied += chunk;
+				if (offset + chunk == iov->iov_len) {
+					backing_base = iov_end;
+					iov_index++;
+				}
+			}
+
+			if (line_len > 0u) {
+				fprintf(stderr,
+					"resource_transfer: backing too small for resource %u (missing %zu bytes)\n",
+					t.resource_id, line_len);
+				free(res_data);
+				return;
+			}
+		}
+		free(res_data);
+	}
 }
 
 static void *resource_thread_func(void *param)
@@ -1178,6 +1230,73 @@ union virtio_gpu_resp {
 	uint8_t data[4096];
 };
 
+void gpu_device_handle_submit_3d(struct gpu_device *g, union virtio_gpu_cmd *cmd, union virtio_gpu_resp *resp) {
+	uint32_t c_submit_rs_id = 0;
+	struct rvgpu_res_transfer c_submit_res = {0};
+	uint32_t *c_submit_buf = NULL;
+	uint32_t c_submit_buf_offset = 0;
+	uint32_t c_submit_header = 0;
+	uint32_t c_submit_len = 0;
+	c_submit_buf = cmd->c_cmdbuf;
+	while (c_submit_buf_offset < (cmd->c_submit.size / 4)) {
+		c_submit_header = c_submit_buf[c_submit_buf_offset];
+		c_submit_len = c_submit_header >> 16;
+		const uint32_t *buf = &c_submit_buf[c_submit_buf_offset];
+		switch (c_submit_header) {
+			case VIRGL_CMD0(VIRGL_CCMD_TRANSFER3D,0,VIRGL_TRANSFER3D_SIZE):
+				c_submit_rs_id = buf[VIRGL_RESOURCE_IW_RES_HANDLE];
+				c_submit_res.x = buf[VIRGL_RESOURCE_IW_X];
+				c_submit_res.y = buf[VIRGL_RESOURCE_IW_Y];
+				c_submit_res.z = buf[VIRGL_RESOURCE_IW_Z];
+				c_submit_res.w = buf[VIRGL_RESOURCE_IW_W];
+				c_submit_res.h = buf[VIRGL_RESOURCE_IW_H];
+				c_submit_res.d = buf[VIRGL_RESOURCE_IW_D];
+				c_submit_res.level = buf[VIRGL_RESOURCE_IW_LEVEL];
+				c_submit_res.stride = buf[VIRGL_RESOURCE_IW_STRIDE];
+				c_submit_res.offset = buf[VIRGL_RESOURCE_IW_DATA_START];
+				c_submit_res.layer_stride = buf[VIRGL_RESOURCE_IW_LAYER_STRIDE];
+				resp->hdr.type = gpu_device_send_res(
+					g, c_submit_rs_id,
+					&c_submit_res);
+				break;
+			case VIRGL_CMD0(VIRGL_CCMD_COPY_TRANSFER3D,0,VIRGL_COPY_TRANSFER3D_SIZE):
+				c_submit_rs_id = buf[VIRGL_COPY_TRANSFER3D_SRC_RES_HANDLE];
+				c_submit_res.x = buf[VIRGL_RESOURCE_IW_X];
+				c_submit_res.y = buf[VIRGL_RESOURCE_IW_Y];
+				c_submit_res.z = buf[VIRGL_RESOURCE_IW_Z];
+				c_submit_res.w = buf[VIRGL_RESOURCE_IW_W];
+				c_submit_res.h = buf[VIRGL_RESOURCE_IW_H];
+				c_submit_res.d = buf[VIRGL_RESOURCE_IW_D];
+				c_submit_res.level = buf[VIRGL_RESOURCE_IW_LEVEL];
+				c_submit_res.stride = buf[VIRGL_RESOURCE_IW_STRIDE];
+				c_submit_res.layer_stride = buf[VIRGL_RESOURCE_IW_LAYER_STRIDE];
+				c_submit_res.offset = buf[VIRGL_COPY_TRANSFER3D_SRC_RES_OFFSET];
+				resp->hdr.type = gpu_device_send_res(
+					g, c_submit_rs_id,
+					&c_submit_res);
+				break;
+			/*TODO*/
+			default:
+				break;
+		}
+		c_submit_buf_offset += c_submit_len + 1;
+	}
+	
+}
+
+static void get_meta_res_from_cmd(struct gpu_device *g, struct virtio_gpu_transfer_host_3d *t, uint32_t *bpp, uint32_t *stride)
+{
+
+	struct rvgpu_res *res;
+	unsigned int res_id = t->resource_id;
+	struct rvgpu_backend *b = g->backend;
+	res = b->plugin_v1.ops.rvgpu_ctx_res_find(&b->plugin_v1.ctx, res_id);
+	uint32_t width = res->info.width >> t->level;
+	*bpp = get_format_bpp(res->info.format);
+	*stride = (t->stride != 0) ?
+					t->stride :
+					*bpp *width;
+}
 static void gpu_device_serve_ctrl(struct gpu_device *g)
 {
 	struct rvgpu_backend *b = g->backend;
@@ -1204,8 +1323,9 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 		struct rvgpu_header rhdr = {
 			.idx = 0,
 			.flags = 0,
+			.stride = 0,
+			.bpp = 0,
 		};
-
 		if (!vqueue_are_requests_available(&g->vq[0]))
 			break;
 
@@ -1232,9 +1352,10 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				add_resp(g, &resp.hdr, vqueue_request_ref(req));
 			}
 
-			if (cmd.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D)
+			if (cmd.hdr.type == VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D){
 				notify_all = false;
-
+				get_meta_res_from_cmd(g, &cmd.t_h3d, &rhdr.bpp, &rhdr.stride);
+			}
 			gpu_device_send_command(b, &rhdr, sizeof(rhdr),
 						notify_all);
 			for (i = 0u; i < req->nr; i++) {
@@ -1303,6 +1424,9 @@ static void gpu_device_serve_ctrl(struct gpu_device *g)
 				}
 #endif
 				break;
+		   case VIRTIO_GPU_CMD_SUBMIT_3D:
+			   gpu_device_handle_submit_3d(g, &cmd, &resp);
+			   break;
 			case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 				resp.hdr.type = gpu_device_send_res(
 					g, cmd.t_2h2d.resource_id,

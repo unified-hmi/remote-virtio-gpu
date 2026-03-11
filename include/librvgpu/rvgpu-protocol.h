@@ -45,6 +45,8 @@ struct rvgpu_header {
 	uint32_t size; /**< Size of the command */
 	uint16_t idx; /**< Source virtio descriptor idx */
 	uint16_t flags; /**< Flags (see enum rvgpu_flags) */
+	uint32_t bpp; /** For request resource (from host) */
+	uint32_t stride; /** For request resource (from host) */
 };
 
 /**

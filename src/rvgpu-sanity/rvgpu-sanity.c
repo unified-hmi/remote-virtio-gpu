@@ -147,12 +147,13 @@ bool sanity_check_resource_rect(const struct virtio_gpu_rect *r, uint32_t width,
 bool sanity_check_resource_box(const struct virtio_gpu_box *b, uint32_t width,
 			       uint32_t height, uint32_t depth)
 {
+	(void)depth;
 	if ((uint64_t)b->x + b->w > width)
 		return false;
 	if ((uint64_t)b->y + b->h > height)
 		return false;
-	if (b->z == 0 && (uint64_t)b->z + b->d > depth)
-		return false;
+	// if (b->z == 0 && (uint64_t)b->z + b->d > depth)
+	// 	return false;
 	return true;
 }
 

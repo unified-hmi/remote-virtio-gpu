@@ -24,6 +24,34 @@
 
 #include <linux/virtio_gpu.h>
 
+#define VIRGL_CMD0(cmd, obj, len) ((cmd) | ((obj) << 8) | ((len) << 16))
+
+#define VIRGL_CCMD_RESOURCE_INLINE_WRITE 9
+#define VIRGL_CCMD_TRANSFER3D 43
+#define VIRGL_CCMD_COPY_TRANSFER3D 45
+
+#define VIRGL_TRANSFER3D_SIZE 13
+#define VIRGL_COPY_TRANSFER3D_SIZE 14
+
+#define VIRGL_COPY_TRANSFER3D_SRC_RES_HANDLE 12
+#define VIRGL_COPY_TRANSFER3D_SRC_RES_OFFSET 13
+
+#define VIRGL_RESOURCE_IW_RES_HANDLE 1
+#define VIRGL_RESOURCE_IW_LEVEL 2
+#define VIRGL_RESOURCE_IW_USAGE 3
+#define VIRGL_RESOURCE_IW_STRIDE 4
+#define VIRGL_RESOURCE_IW_LAYER_STRIDE 5
+#define VIRGL_RESOURCE_IW_X 6
+#define VIRGL_RESOURCE_IW_Y 7
+#define VIRGL_RESOURCE_IW_Z 8
+#define VIRGL_RESOURCE_IW_W 9
+#define VIRGL_RESOURCE_IW_H 10
+#define VIRGL_RESOURCE_IW_D 11
+#define VIRGL_RESOURCE_IW_DATA_START 12
+
+#define VIRGL_MAX_TBUF_DWORDS 1024
+#define VIRGL_MAX_CMDBUF_DWORDS ((64 * 1024) + VIRGL_MAX_TBUF_DWORDS)
+
 union virtio_gpu_cmd {
 	struct virtio_gpu_ctrl_hdr hdr;
 	struct virtio_gpu_resource_unref r_unref;
@@ -48,7 +76,7 @@ union virtio_gpu_cmd {
 	struct virtio_gpu_get_capset capset;
 	struct virtio_gpu_get_capset_info capset_info;
 	struct virtio_gpu_update_cursor cursor;
-	char buf[256 * 1024];
+	char buf[VIRGL_MAX_CMDBUF_DWORDS * 4 + sizeof(struct virtio_gpu_cmd_submit)];
 };
 
 /**

@@ -195,159 +195,6 @@ static struct rvgpu_res *gpu_device_get_res(struct ctx_priv *ctx_priv,
 	return NULL;
 }
 
-// Function to determine bytes per pixel for a given format
-int get_format_bpp(enum virgl_formats format)
-{
-	switch (format) {
-	case VIRGL_FORMAT_NONE:
-		return 0;
-	case VIRGL_FORMAT_B8G8R8A8_UNORM:
-	case VIRGL_FORMAT_B8G8R8X8_UNORM:
-	case VIRGL_FORMAT_A8R8G8B8_UNORM:
-	case VIRGL_FORMAT_X8R8G8B8_UNORM:
-	case VIRGL_FORMAT_R8G8B8A8_UNORM:
-	case VIRGL_FORMAT_X8B8G8R8_UNORM:
-	case VIRGL_FORMAT_A8B8G8R8_SRGB:
-	case VIRGL_FORMAT_X8B8G8R8_SRGB:
-	case VIRGL_FORMAT_B8G8R8A8_SRGB:
-	case VIRGL_FORMAT_B8G8R8X8_SRGB:
-	case VIRGL_FORMAT_A8R8G8B8_SRGB:
-	case VIRGL_FORMAT_X8R8G8B8_SRGB:
-	case VIRGL_FORMAT_R8G8B8A8_SRGB:
-	case VIRGL_FORMAT_R8G8B8A8_SINT:
-	case VIRGL_FORMAT_R8G8B8A8_UINT:
-	case VIRGL_FORMAT_A8B8G8R8_UNORM:
-	case VIRGL_FORMAT_R8G8B8X8_UNORM:
-	case VIRGL_FORMAT_R8G8B8X8_SRGB:
-	case VIRGL_FORMAT_R8G8B8X8_SINT:
-	case VIRGL_FORMAT_R8G8B8X8_UINT:
-	case VIRGL_FORMAT_R32_FLOAT:
-	case VIRGL_FORMAT_R32_UNORM:
-	case VIRGL_FORMAT_R32_USCALED:
-	case VIRGL_FORMAT_R32_SNORM:
-	case VIRGL_FORMAT_R32_SSCALED:
-	case VIRGL_FORMAT_R32_FIXED:
-	case VIRGL_FORMAT_R32_UINT:
-	case VIRGL_FORMAT_R32_SINT:
-	case VIRGL_FORMAT_R10G10B10A2_UNORM:
-	case VIRGL_FORMAT_R10G10B10A2_USCALED:
-	case VIRGL_FORMAT_R10G10B10A2_SSCALED:
-	case VIRGL_FORMAT_R10G10B10A2_SNORM:
-	case VIRGL_FORMAT_R10G10B10A2_UINT:
-	case VIRGL_FORMAT_B10G10R10A2_UNORM:
-	case VIRGL_FORMAT_B10G10R10A2_USCALED:
-	case VIRGL_FORMAT_B10G10R10A2_SSCALED:
-	case VIRGL_FORMAT_B10G10R10A2_SNORM:
-	case VIRGL_FORMAT_B10G10R10A2_UINT:
-	case VIRGL_FORMAT_A8B8G8R8_SNORM:
-	case VIRGL_FORMAT_X8B8G8R8_SNORM:
-	case VIRGL_FORMAT_R10G10B10X2_UNORM:
-	case VIRGL_FORMAT_A4B4G4R4_UNORM:
-		return 4; // 32 bits = 4 bytes
-	case VIRGL_FORMAT_B5G5R5A1_UNORM:
-	case VIRGL_FORMAT_B4G4R4A4_UNORM:
-	case VIRGL_FORMAT_B5G6R5_UNORM:
-	case VIRGL_FORMAT_L8A8_UNORM:
-	case VIRGL_FORMAT_R16_UNORM:
-	case VIRGL_FORMAT_R16_USCALED:
-	case VIRGL_FORMAT_R16_SNORM:
-	case VIRGL_FORMAT_R16_SSCALED:
-	case VIRGL_FORMAT_R16_FLOAT:
-	case VIRGL_FORMAT_R16_UINT:
-	case VIRGL_FORMAT_R16_SINT:
-	case VIRGL_FORMAT_L8A8_SRGB:
-	case VIRGL_FORMAT_R8G8_UNORM:
-	case VIRGL_FORMAT_R8G8_USCALED:
-	case VIRGL_FORMAT_R8G8_SNORM:
-	case VIRGL_FORMAT_R8G8_SSCALED:
-	case VIRGL_FORMAT_R8G8_UINT:
-	case VIRGL_FORMAT_R8G8_SINT:
-	case VIRGL_FORMAT_G8R8_SNORM:
-	case VIRGL_FORMAT_G8R8_UNORM:
-	case VIRGL_FORMAT_A8L8_UNORM:
-	case VIRGL_FORMAT_A8L8_SNORM:
-	case VIRGL_FORMAT_A8L8_SRGB:
-		return 2; // 16 bits = 2 bytes
-	case VIRGL_FORMAT_L8_UNORM:
-	case VIRGL_FORMAT_A8_UNORM:
-	case VIRGL_FORMAT_I8_UNORM:
-	case VIRGL_FORMAT_S8_UINT:
-	case VIRGL_FORMAT_R8_UNORM:
-	case VIRGL_FORMAT_R8_USCALED:
-	case VIRGL_FORMAT_R8_SNORM:
-	case VIRGL_FORMAT_R8_SSCALED:
-	case VIRGL_FORMAT_L8_SRGB:
-	case VIRGL_FORMAT_R8_UINT:
-	case VIRGL_FORMAT_R8_SINT:
-	case VIRGL_FORMAT_R8_SRGB:
-		return 1; // 8 bits = 1 byte
-	case VIRGL_FORMAT_R64_FLOAT:
-		return 8; // 64 bits = 8 bytes
-	case VIRGL_FORMAT_R64G64_FLOAT:
-		return 16; // 128 bits = 16 bytes
-	case VIRGL_FORMAT_R64G64B64_FLOAT:
-		return 24; // 192 bits = 24 bytes
-	case VIRGL_FORMAT_R64G64B64A64_FLOAT:
-		return 32; // 256 bits = 32 bytes
-	case VIRGL_FORMAT_R32G32_FLOAT:
-	case VIRGL_FORMAT_R32G32_UNORM:
-	case VIRGL_FORMAT_R32G32_USCALED:
-	case VIRGL_FORMAT_R32G32_SNORM:
-	case VIRGL_FORMAT_R32G32_SSCALED:
-	case VIRGL_FORMAT_R32G32_FIXED:
-	case VIRGL_FORMAT_R32G32_UINT:
-	case VIRGL_FORMAT_R32G32_SINT:
-		return 8; // 64 bits = 8 bytes
-	case VIRGL_FORMAT_R32G32B32_FLOAT:
-	case VIRGL_FORMAT_R32G32B32_UNORM:
-	case VIRGL_FORMAT_R32G32B32_USCALED:
-	case VIRGL_FORMAT_R32G32B32_SNORM:
-	case VIRGL_FORMAT_R32G32B32_SSCALED:
-	case VIRGL_FORMAT_R32G32B32_FIXED:
-	case VIRGL_FORMAT_R32G32B32_UINT:
-	case VIRGL_FORMAT_R32G32B32_SINT:
-		return 12; // 96 bits = 12 bytes
-	case VIRGL_FORMAT_R32G32B32A32_FLOAT:
-	case VIRGL_FORMAT_R32G32B32A32_UNORM:
-	case VIRGL_FORMAT_R32G32B32A32_USCALED:
-	case VIRGL_FORMAT_R32G32B32A32_SNORM:
-	case VIRGL_FORMAT_R32G32B32A32_SSCALED:
-	case VIRGL_FORMAT_R32G32B32A32_FIXED:
-	case VIRGL_FORMAT_R32G32B32A32_UINT:
-	case VIRGL_FORMAT_R32G32B32A32_SINT:
-		return 16; // 128 bits = 16 bytes
-	case VIRGL_FORMAT_R16G16_UNORM:
-	case VIRGL_FORMAT_R16G16_USCALED:
-	case VIRGL_FORMAT_R16G16_SNORM:
-	case VIRGL_FORMAT_R16G16_SSCALED:
-	case VIRGL_FORMAT_R16G16_FLOAT:
-	case VIRGL_FORMAT_R16G16_UINT:
-	case VIRGL_FORMAT_R16G16_SINT:
-	case VIRGL_FORMAT_G16R16_UNORM:
-	case VIRGL_FORMAT_G16R16_SNORM:
-		return 4; // 32 bits = 4 bytes
-	case VIRGL_FORMAT_R16G16B16_UNORM:
-	case VIRGL_FORMAT_R16G16B16_USCALED:
-	case VIRGL_FORMAT_R16G16B16_SNORM:
-	case VIRGL_FORMAT_R16G16B16_SSCALED:
-	case VIRGL_FORMAT_R16G16B16_FLOAT:
-	case VIRGL_FORMAT_R16G16B16_UINT:
-	case VIRGL_FORMAT_R16G16B16_SINT:
-		return 6; // 48 bits = 6 bytes
-	case VIRGL_FORMAT_R16G16B16A16_UNORM:
-	case VIRGL_FORMAT_R16G16B16A16_USCALED:
-	case VIRGL_FORMAT_R16G16B16A16_SNORM:
-	case VIRGL_FORMAT_R16G16B16A16_SSCALED:
-	case VIRGL_FORMAT_R16G16B16A16_FLOAT:
-	case VIRGL_FORMAT_R16G16B16A16_UINT:
-	case VIRGL_FORMAT_R16G16B16A16_SINT:
-		return 8; // 64 bits = 8 bytes
-	default:
-		fprintf(stderr, "Format is not Support: %s\n",
-			get_virgl_format_string(format));
-		return 0;
-	}
-}
 
 static inline uint32_t align_up_power_of_2(uint32_t n, uint32_t a)
 {
@@ -421,11 +268,15 @@ static size_t compressed_data_size(uint32_t format, uint32_t width,
 	case VIRGL_FORMAT_ETC2_SRGB8:
 	case VIRGL_FORMAT_ETC2_RGB8A1:
 	case VIRGL_FORMAT_ETC2_SRGB8A1:
-		// ETC1/ETC2 block size is 8 bytes for a 4x4 pixel block
+  case VIRGL_FORMAT_ETC2_R11_UNORM:
+  case VIRGL_FORMAT_ETC2_R11_SNORM:
+		// ETC1/ETC2/EAC R11 block size is 8 bytes for a 4x4 pixel block
 		return ((width + 3) / 4) * ((height + 3) / 4) * 8;
 	case VIRGL_FORMAT_ETC2_RGBA8:
 	case VIRGL_FORMAT_ETC2_SRGBA8:
-		// ETC2 RGBA block size is 16 bytes for a 4x4 pixel block
+  case VIRGL_FORMAT_ETC2_RG11_UNORM:
+  case VIRGL_FORMAT_ETC2_RG11_SNORM:
+		// ETC2 RGBA and EAC RG11 block size is 16 bytes for a 4x4 pixel block
 		return ((width + 3) / 4) * ((height + 3) / 4) * 16;
 	case VIRGL_FORMAT_ASTC_4x4:
 	case VIRGL_FORMAT_ASTC_4x4_SRGB:
@@ -495,9 +346,26 @@ int rvgpu_ctx_transfer_to_host(struct rvgpu_ctx *ctx,
 			       const struct rvgpu_res *res)
 {
 	struct rvgpu_patch p = { .len = 0 };
+	size_t size = 0;
 	if (res->info.target == 0) {
-		gpu_device_send_data(ctx, res->backing, res->nbacking,
-				     t->offset, t->w);
+		if (t->stride > 0) {
+			if (t->d > 1 && t->h > 1) {
+				// Transfer h rows, each of stride bytes, for d slices
+				// (3D texture)
+				size = t->d * t->h * t->stride;
+			} else if (t->h > 1) {
+				// Transfer h rows, each of stride bytes
+				size = t->h * t->stride;
+			} else if (t->w > 0) {
+				// Transfer a single row of tride bytes
+				size = t->stride;
+			}
+		} else if (t->w > 0) {
+			size = t->w;
+		}
+		if (size > 0)
+			gpu_device_send_data(ctx, res->backing, res->nbacking,
+					     t->offset, size);
 	} else if (res->info.target == 2) {
 		if (virgl_format_is_compressed(res->info.format)) {
 			size_t compressed_size = compressed_data_size(
@@ -518,6 +386,21 @@ int rvgpu_ctx_transfer_to_host(struct rvgpu_ctx *ctx,
 			gpu_device_send_data(ctx, res->backing, res->nbacking,
 					     t->offset, size);
 		}
+	} else if ( res->info.target == 3)
+	{
+		// 3D texture
+		unsigned int bpp = get_format_bpp(res->info.format);
+		uint32_t width = res->info.width >> t->level; // calculate width at level
+		uint32_t height = res->info.height >> t->level; // calculate height at level
+		uint32_t stride = (t->stride != 0) ?
+						t->stride :
+						bpp * width;
+		uint32_t layer_stride = (t->layer_stride != 0) ?
+						t->layer_stride :
+						stride * height;
+		size_t size = (t->h - 1U) * stride + t->w * bpp + layer_stride * (t->d - 1U);
+		gpu_device_send_data(ctx, res->backing, res->nbacking,
+					t->offset, size);
 	} else {
 		gpu_device_send_data(ctx, res->backing, res->nbacking,
 				     t->offset, SIZE_MAX);

@@ -121,6 +121,7 @@ struct rvgpu_res_transfer {
 	uint32_t w, h, d;
 	uint32_t level;
 	uint32_t stride;
+	uint32_t layer_stride;
 	uint64_t offset;
 };
 

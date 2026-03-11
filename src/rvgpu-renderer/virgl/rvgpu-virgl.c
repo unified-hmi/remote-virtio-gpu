@@ -170,8 +170,13 @@ static int rvgpu_pr_readbuf(struct rvgpu_pr_state *p, int stream)
 		ssize_t n;
 
 		n = read(pfd[0].fd, p->buffer[stream], p->buftotlen[stream]);
-		if (n <= 0)
+		if (n <= 0){
+			if (n == 0)
+				warnx("Connection was closed");
+			else
+				warn("Error while reading from socket");
 			return 0;
+		}
 
 		p->bufcurlen[stream] = (size_t)n;
 		p->bufpos[stream] = 0u;
@@ -277,15 +282,21 @@ resource_attach_backing(struct virtio_gpu_resource_attach_backing *r,
 		err(1, "Out of mem");
 
 	resmem = malloc(length);
-	if (resmem == NULL)
+	if (resmem == NULL) {
+		free(p);
 		err(1, "Out of mem");
+	}
 
 	memset(resmem, 0x0, length);
 
 	p->iov_base = resmem;
 	p->iov_len = length;
 
-	virgl_renderer_resource_attach_iov(r->resource_id, p, 1);
+	if (virgl_renderer_resource_attach_iov(r->resource_id, p, 1) != 0) {
+		free(resmem);
+		free(p);
+		err(1, "Failed to attach resource backing");
+	}
 }
 
 static void load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
@@ -359,7 +370,7 @@ static void write_to_socket(int socket, char *buf, size_t size)
 }
 
 static void upload_resource(struct rvgpu_pr_state *state,
-			    struct virtio_gpu_transfer_host_3d *t)
+			    struct virtio_gpu_transfer_host_3d *t, uint32_t bpp, uint32_t stride)
 {
 	struct iovec *p = NULL;
 	int iovn = 0;
@@ -367,9 +378,11 @@ static void upload_resource(struct rvgpu_pr_state *state,
 		.type = RVGPU_RES_TRANSFER
 	};
 	struct rvgpu_header header = {
-		.size = sizeof(struct virtio_gpu_transfer_host_3d)
+		.size = sizeof(struct virtio_gpu_transfer_host_3d),
+		.bpp = bpp,
+		.stride = stride
 	};
-	struct rvgpu_patch patch;
+	struct rvgpu_patch patch = {0, 0, 0};
 
 	virgl_renderer_resource_detach_iov(t->resource_id, &p, &iovn);
 	if (p == NULL)
@@ -379,9 +392,11 @@ static void upload_resource(struct rvgpu_pr_state *state,
 	write_to_socket(state->res_socket, (char *)&header, sizeof(header));
 	write_to_socket(state->res_socket, (char *)t,
 			sizeof(struct virtio_gpu_transfer_host_3d));
-
 	patch.offset = t->offset;
 	patch.len = p[0].iov_len - patch.offset;
+	size_t length = (t->box.h - 1u) * stride + t->box.w * bpp;
+	if (patch.len > length)
+		patch.len = length;
 
 	write_to_socket(state->res_socket, (char *)&patch, sizeof(patch));
 	write_to_socket(state->res_socket, (char *)p[0].iov_base + patch.offset,
@@ -438,53 +453,6 @@ static void clear_scanout(struct rvgpu_pr_state *p, struct rvgpu_scanout *s)
 	rvgpu_egl_set_scanout(p->egl, s, &params);
 }
 
-static void dump_capset(struct rvgpu_pr_state *p)
-{
-	/*
-	 * First argument for virgl_renderer_get_cap_set()
-	 * is for backend id, we support only
-	 * VIRTIO_GPU_CAPSET_VIRGL (== 1)
-	 * but let's also dump
-	 * VIRTIO_GPU_CAPSET_VIRGL2 (== 2)
-	 * to be ready to move to the next version.
-	 */
-	uint32_t ids[] = { VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2 };
-	long unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(ids); i++) {
-		uint32_t maxver, maxsize;
-
-		virgl_renderer_get_cap_set(ids[i], &maxver, &maxsize);
-		if (maxsize == 0 || maxsize >= CAPSET_MAX_SIZE) {
-			warnx("Error while getting capset %u (maxsize=%u)",
-			      ids[i], maxsize);
-			break;
-		}
-
-		for (unsigned int version = 0; version <= maxver; version++) {
-			struct capset hdr = { .id = ids[i],
-					      .version = version,
-					      .size = maxsize };
-			static uint8_t data[CAPSET_MAX_SIZE];
-
-			memset(data, 0, maxsize);
-			virgl_renderer_fill_caps(ids[i], version, data);
-			hdr.size = maxsize;
-
-			if (fwrite(&hdr, sizeof(hdr), 1, p->pp.capset) != 1)
-				warn("Error while dumping capset");
-
-			if (fwrite(data, maxsize, 1, p->pp.capset) != 1)
-				warn("Error while dumping capset");
-
-			warnx("capset dumped for id %u version %u size %u",
-			      ids[i], version, maxsize);
-		}
-	}
-	fflush(p->pp.capset);
-	p->pp.capset = NULL;
-}
-
 static bool check_rect(uint32_t resource_id, const struct virtio_gpu_rect *r)
 {
 	struct virgl_renderer_resource_info info;
@@ -533,24 +501,102 @@ static void rvgpu_serve_move_cursor(struct rvgpu_pr_state *p,
 	p->egl->cb->move_cursor(p->egl, c->pos.x, c->pos.y);
 }
 
+static void rvgpu_handle_submit_3d(struct rvgpu_pr_state *p, union virtio_gpu_cmd *r)
+{
+	uint32_t *c_submit_buf = NULL;
+	uint32_t c_submit_buf_offset = 0;
+	uint32_t c_submit_header = 0;
+	uint32_t c_submit_len = 0;
+	uint32_t c_submit_rs_id = 0;
+	c_submit_buf = r->c_cmdbuf;
+	while (c_submit_buf_offset < (r->c_submit.size / 4)) {
+		c_submit_header = c_submit_buf[c_submit_buf_offset];
+		c_submit_len = c_submit_header >> 16;
+		const uint32_t *buf = &c_submit_buf[c_submit_buf_offset];
+		switch (c_submit_header) {
+			case VIRGL_CMD0(VIRGL_CCMD_TRANSFER3D,0,VIRGL_TRANSFER3D_SIZE):
+				c_submit_rs_id = buf[VIRGL_RESOURCE_IW_RES_HANDLE];
+				if (!load_resource(p, c_submit_rs_id)) {
+					break;
+				}
+				break;
+			case VIRGL_CMD0(VIRGL_CCMD_COPY_TRANSFER3D,0,VIRGL_COPY_TRANSFER3D_SIZE):
+				c_submit_rs_id = buf[VIRGL_COPY_TRANSFER3D_SRC_RES_HANDLE];
+				if (!load_resource(p, c_submit_rs_id)) {
+					break;
+				}
+				break;
+			/*TODO*/
+			default:
+				break;
+		}
+		c_submit_buf_offset += c_submit_len + 1;
+	}
+	virgl_renderer_submit_cmd(r->c_cmdbuf, (int)r->hdr.ctx_id,
+							  r->c_submit.size / 4);
+	p->egl->has_submit_3d_draw = true;
+}
+
 unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 {
 	static union virtio_gpu_cmd r;
 	struct rvgpu_header uhdr;
 	static int current_scanout_id;
+	static bool isWaitingForFirstCmd = true;
 
-	if (p->pp.capset)
-		dump_capset(p);
+	if (isWaitingForFirstCmd) {
+		uint32_t ids[] = { VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VIRGL2 };
+		long unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(ids); i++) {
+			uint32_t maxver, maxsize;
+
+			virgl_renderer_get_cap_set(ids[i], &maxver, &maxsize);
+			if (maxsize == 0 || maxsize >= CAPSET_MAX_SIZE) {
+				warnx("Error while getting capset %u (maxsize=%u)",
+				      ids[i], maxsize);
+				break;
+			}
+
+			for (unsigned int version = 0; version <= maxver; version++) {
+				static uint8_t data[CAPSET_MAX_SIZE];
+
+				memset(data, 0, maxsize);
+				virgl_renderer_fill_caps(ids[i], version, data);
+
+				if(p->pp.capset) {
+					struct capset hdr = { .id = ids[i],
+							      .version = version,
+							      .size = maxsize };
+
+					hdr.size = maxsize;
+
+					if (fwrite(&hdr, sizeof(hdr), 1, p->pp.capset) != 1)
+						warn("Error while dumping capset");
+
+					if (fwrite(data, maxsize, 1, p->pp.capset) != 1)
+						warn("Error while dumping capset");
+
+					warnx("capset dumped for id %u version %u size %u",
+					      ids[i], version, maxsize);
+				}
+			}
+		}
+		if (p->pp.capset) {
+			fflush(p->pp.capset);
+			p->pp.capset = NULL;
+		}
+		isWaitingForFirstCmd = false;
+	}
 
 	p->egl->has_submit_3d_draw = false;
 	double virgl_cmd_laptime = 0;
 	while (rvgpu_pr_read(p, &uhdr, sizeof(uhdr), 1, COMMAND) == 1) {
-		struct iovec *piov;
+		struct iovec *piov = NULL;
 		size_t ret;
 		int n;
 		unsigned int draw = 0;
 		enum virtio_gpu_ctrl_type sane;
-
 		memset(&r.hdr, 0, sizeof(r.hdr));
 		if (uhdr.size > sizeof(r))
 			errx(1, "Too long read (%u)", uhdr.size);
@@ -573,7 +619,6 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 
 		virgl_renderer_force_ctx_0();
 		virgl_renderer_poll();
-		//printf("rvgpu_pr_dispatch r.hdr.type: %d\n", r.hdr.type);
 		switch (r.hdr.type) {
 		case VIRTIO_GPU_CMD_CTX_CREATE:
 			virgl_renderer_context_create(r.hdr.ctx_id,
@@ -617,9 +662,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 				NULL, 0);
 			break;
 		case VIRTIO_GPU_CMD_SUBMIT_3D:
-			virgl_renderer_submit_cmd(r.c_cmdbuf, (int)r.hdr.ctx_id,
-						  r.c_submit.size / 4);
-			p->egl->has_submit_3d_draw = true;
+			rvgpu_handle_submit_3d(p, &r);
 			break;
 		case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
 			if (!load_resource(p, r.t_2h2d.resource_id)) {
@@ -663,7 +706,7 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 					r.t_h3d.layer_stride,
 					(struct virgl_box *)&r.t_h3d.box,
 					r.t_h3d.offset, NULL, 0);
-				upload_resource(p, &r.t_h3d);
+				upload_resource(p, &r.t_h3d, uhdr.bpp, uhdr.stride);
 			} else {
 				errx(1, "Invalid box transfer");
 			}

@@ -102,9 +102,8 @@ void vqueue_send_response(struct vqueue_request *req,
 			  void *resp, size_t resp_len)
 {
 	struct vqueue *q = req->q;
-	uint16_t idx = atomic_load((atomic_ushort *)&q->vr.used->idx);
+	uint16_t idx = atomic_load_explicit((atomic_ushort *)&q->vr.used->idx, memory_order_relaxed);
 	struct vring_used_elem *el = &q->vr.used->ring[idx % q->vr.num];
-	struct timespec barrier_delay = { .tv_nsec = 10 };
 	size_t i;
 
 	resp_len = copy_to_iov(req->w, req->nw, resp, resp_len);
@@ -117,15 +116,10 @@ void vqueue_send_response(struct vqueue_request *req,
 
 	req->mapped = false;
 
-	/* FIXME: Without this delay, kernel crashes in virtio-gpu driver
-	 * most probable cause is race condition.
-	 * Remove delay when race condition is fixed properly.
-	 */
-	clock_nanosleep(CLOCK_MONOTONIC, 0, &barrier_delay, NULL);
-
-	atomic_store((atomic_uint *)&el->len, resp_len);
-	atomic_store((atomic_uint *)&el->id, req->idx);
+	atomic_store_explicit((atomic_uint *)&el->len, resp_len, memory_order_relaxed);
+	atomic_store_explicit((atomic_uint *)&el->id, req->idx, memory_order_relaxed);
+	atomic_thread_fence(memory_order_release);
 	idx++;
-	atomic_store((atomic_ushort *)&q->vr.used->idx, idx);
+	atomic_store_explicit((atomic_ushort *)&q->vr.used->idx, idx, memory_order_release);
 	vqueue_request_unref(req);
 }
