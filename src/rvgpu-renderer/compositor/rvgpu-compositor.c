@@ -1581,6 +1581,12 @@ static void *rvgpu_input_event_loop(void *arg)
 			perror("rvgpu_input_event_loop poll");
 			break;
 		}
+		if (pfd.revents & POLLNVAL) {
+			break;
+		}
+		if (pfd.revents & (POLLHUP | POLLERR)) {
+			break;
+		}
 		if (pfd.revents & POLLIN) {
 			json_t *json_obj = recv_json(server_rvgpu_fd);
 			int event_id;
@@ -1722,6 +1728,8 @@ static void *rvgpu_input_event_loop(void *arg)
 #endif
 		}
 	}
+	fclose(input_stream);
+	rvgpu_in_free(in);
 	return NULL;
 }
 

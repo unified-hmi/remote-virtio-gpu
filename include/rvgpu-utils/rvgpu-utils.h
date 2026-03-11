@@ -24,9 +24,13 @@
 #define ARRAY_SIZE(a) (sizeof((a)) / sizeof((a)[0]))
 #endif
 
+#include <sys/types.h>
+
 int recv_int(int fd, int *value);
 int send_int(int fd, int value);
 void send_str_with_size(int client_fd, const char *str);
 char *recv_str_all(int client_fd);
+ssize_t write_all(int fd, const void *buf, size_t count);
+ssize_t read_all(int fd, void *buf, size_t count);
 
 #endif /* RVGPU_UTILS_H */

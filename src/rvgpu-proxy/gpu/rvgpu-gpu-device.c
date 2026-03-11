@@ -52,6 +52,7 @@
 #include <rvgpu-proxy/gpu/rvgpu-iov.h>
 #include <rvgpu-proxy/gpu/rvgpu-map-guest.h>
 #include <rvgpu-proxy/gpu/rvgpu-vqueue.h>
+#include <rvgpu-utils/rvgpu-utils.h>
 
 #define GPU_MAX_CAPDATA 16
 
@@ -177,42 +178,6 @@ static inline uint64_t bit64(unsigned int shift)
 	return ((uint64_t)1) << shift;
 }
 static enum reset_state gpu_reset_state;
-
-int read_all(int fd, void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t r = read(fd, (char *)buf + offset, bytes - offset);
-		if (r > 0) {
-			offset += (size_t)r;
-		} else if (r == 0) {
-			warnx("Connection was closed");
-			return -1;
-		} else if (errno != EAGAIN) {
-			warn("Error while reading from socket");
-			return -1;
-		}
-	}
-	return offset;
-}
-
-int write_all(int fd, const void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t written =
-			write(fd, (const char *)buf + offset, bytes - offset);
-		if (written >= 0) {
-			offset += (size_t)written;
-		} else if (errno != EAGAIN) {
-			warn("Error while writing to socket");
-			return -1;
-		}
-	}
-	return offset;
-}
 
 static int rvgpu_init_backends(struct rvgpu_backend *b,
 			       struct rvgpu_scanout_arguments *scanout_args)

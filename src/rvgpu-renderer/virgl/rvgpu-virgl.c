@@ -55,42 +55,6 @@ struct rvgpu_pr_state {
 
 static void clear_scanout(struct rvgpu_pr_state *p, struct rvgpu_scanout *s);
 
-int read_all(int fd, void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t r = read(fd, (char *)buf + offset, bytes - offset);
-		if (r > 0) {
-			offset += (size_t)r;
-		} else if (r == 0) {
-			warnx("Connection was closed");
-			return -1;
-		} else if (errno != EAGAIN) {
-			warn("Error while reading from socket");
-			return -1;
-		}
-	}
-	return offset;
-}
-
-int write_all(int fd, const void *buf, size_t bytes)
-{
-	size_t offset = 0;
-
-	while (offset < bytes) {
-		ssize_t written =
-			write(fd, (const char *)buf + offset, bytes - offset);
-		if (written >= 0) {
-			offset += (size_t)written;
-		} else if (errno != EAGAIN) {
-			warn("Error while writing to socket");
-			return -1;
-		}
-	}
-	return offset;
-}
-
 static virgl_renderer_gl_context
 create_context(void *opaque, int scanout_idx,
 	       struct virgl_renderer_gl_ctx_param *params)
@@ -128,8 +92,8 @@ static void virgl_write_fence(void *opaque, uint32_t fence)
 	if (fence > state->fence_sent)
 		state->fence_sent = fence;
 
-	int res = write_all(state->res_socket, &msg,
-			    sizeof(struct rvgpu_res_message_header));
+	ssize_t res = write_all(state->res_socket, &msg,
+				sizeof(struct rvgpu_res_message_header));
 	assert(res >= 0);
 	(void)res;
 }
@@ -299,7 +263,7 @@ resource_attach_backing(struct virtio_gpu_resource_attach_backing *r,
 	}
 }
 
-static void load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
+static bool load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
 {
 	struct rvgpu_patch header = { 0, 0, 0 };
 	int stream = COMMAND;
@@ -317,9 +281,11 @@ static void load_resource_patched(struct rvgpu_pr_state *state, struct iovec *p)
 
 		if (rvgpu_pr_read(state, (char *)p[0].iov_base + offset, 1,
 				  header.len, stream) != header.len) {
-			err(1, "Short read");
+			/* Connection closed by peer */
+			return false;
 		}
 	}
+	return true;
 }
 
 static bool load_resource(struct rvgpu_pr_state *state, unsigned int res_id)
@@ -333,7 +299,11 @@ static bool load_resource(struct rvgpu_pr_state *state, unsigned int res_id)
 		load = false;
 
 	if (load) {
-		load_resource_patched(state, p);
+		if (!load_resource_patched(state, p)) {
+			/* Connection closed, re-attach iov and signal failure */
+			virgl_renderer_resource_attach_iov(res_id, p, iovn);
+			return false;
+		}
 		virgl_renderer_resource_attach_iov(res_id, p, iovn);
 	}
 
@@ -602,8 +572,12 @@ unsigned int rvgpu_pr_dispatch(struct rvgpu_pr_state *p)
 			errx(1, "Too long read (%u)", uhdr.size);
 
 		ret = rvgpu_pr_read(p, &r, 1, uhdr.size, COMMAND);
-		if (ret != uhdr.size)
+		if (ret != uhdr.size) {
+			/* Connection closed by peer, exit gracefully */
+			if (ret == 0)
+				return 0;
 			errx(1, "Too short read(%zu < %u)", ret, uhdr.size);
+		}
 
 		if (p->egl->scanouts[current_scanout_id].fps_params.show_fps) {
 			virgl_cmd_laptime = current_get_time_ms();

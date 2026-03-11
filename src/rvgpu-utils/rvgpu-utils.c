@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <errno.h>
+#include <err.h>
 
 #include <sys/types.h>
 #include <arpa/inet.h>
@@ -46,20 +47,69 @@ int recv_int(int fd, int *value)
 	return 0;
 }
 
+ssize_t write_all(int fd, const void *buf, size_t count)
+{
+	const char *ptr = (const char *)buf;
+	size_t remaining = count;
+	ssize_t written;
+
+	while (remaining > 0) {
+		written = write(fd, ptr, remaining);
+		if (written < 0) {
+			if (errno == EINTR || errno == EAGAIN ||
+			    errno == EWOULDBLOCK)
+				continue;
+			warn("Error while writing to socket");
+			return -1;
+		} else if (written == 0) {
+			break;
+		}
+		ptr += written;
+		remaining -= written;
+	}
+
+	return count - remaining;
+}
+
+ssize_t read_all(int fd, void *buf, size_t count)
+{
+	char *ptr = (char *)buf;
+	size_t remaining = count;
+	ssize_t received;
+
+	while (remaining > 0) {
+		received = read(fd, ptr, remaining);
+		if (received < 0) {
+			if (errno == EINTR || errno == EAGAIN ||
+			    errno == EWOULDBLOCK)
+				continue;
+			warn("Error while reading from socket");
+			return -1;
+		} else if (received == 0) {
+			/* EOF - connection closed by peer */
+			break;
+		}
+		ptr += received;
+		remaining -= received;
+	}
+
+	return count - remaining;
+}
+
 void send_str_with_size(int client_fd, const char *str)
 {
 	uint32_t buffer_size_hb = strlen(str) + 1;
 	uint32_t buffer_size = htonl(buffer_size_hb);
 
 	ssize_t sent_bytes =
-		write(client_fd, &buffer_size, sizeof(buffer_size));
-	if (sent_bytes == -1) {
+		write_all(client_fd, &buffer_size, sizeof(buffer_size));
+	if (sent_bytes != sizeof(buffer_size)) {
 		perror("send_str_with_size size write");
 		return;
 	}
 
-	sent_bytes = write(client_fd, str, buffer_size_hb);
-	if (sent_bytes == -1) {
+	sent_bytes = write_all(client_fd, str, buffer_size_hb);
+	if (sent_bytes != (ssize_t)buffer_size_hb) {
 		perror("send_str_with_size data write");
 	}
 }
@@ -67,54 +117,27 @@ void send_str_with_size(int client_fd, const char *str)
 // Need to free buffer after use
 char *recv_str_all(int client_fd)
 {
-	ssize_t received_bytes;
 	uint32_t buffer_size_nb;
 
-	received_bytes =
-		read(client_fd, &buffer_size_nb, sizeof(buffer_size_nb));
-	if (received_bytes <= 0) {
-		close(client_fd);
+	ssize_t received_bytes =
+		read_all(client_fd, &buffer_size_nb, sizeof(buffer_size_nb));
+	if (received_bytes != sizeof(buffer_size_nb)) {
 		return NULL;
 	}
 
 	uint32_t buffer_size = ntohl(buffer_size_nb);
 	char *buffer = (char *)calloc(buffer_size + 1, sizeof(char));
 	if (buffer == NULL) {
-		close(client_fd);
 		return NULL;
 	}
 
-	ssize_t total_received_bytes = 0;
-	struct pollfd fds;
-	fds.fd = client_fd;
-	fds.events = POLLIN;
-
-	while (total_received_bytes < buffer_size) {
-		int poll_result = poll(&fds, 1, -1);
-		if (poll_result == -1) {
-			perror("poll");
-			free(buffer);
-			return NULL;
-		}
-
-		if (fds.revents & POLLIN) {
-			received_bytes =
-				read(client_fd, buffer + total_received_bytes,
-				     buffer_size - total_received_bytes);
-			if (received_bytes < 0) {
-				perror("read");
-				free(buffer);
-				return NULL;
-			} else if (received_bytes == 0) {
-				// Connection closed by the peer
-				break;
-			}
-
-			total_received_bytes += received_bytes;
-		}
+	received_bytes = read_all(client_fd, buffer, buffer_size);
+	if (received_bytes != (ssize_t)buffer_size) {
+		free(buffer);
+		return NULL;
 	}
 
-	buffer[total_received_bytes] = '\0';
+	buffer[buffer_size] = '\0';
 
 	return buffer;
 }
