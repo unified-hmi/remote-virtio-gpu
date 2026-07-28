@@ -553,20 +553,12 @@ void *rvgpu_gbm_init(void *params, int *width, int *height)
 	drmModeFreeResources(res);
 
 	/* GBM->EGL glue */
-#ifdef EGL_VERSION_GE_1_5
-	g->egl.dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, g->gbm_device,
-					   NULL);
-#else
-	PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
-		(PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
-			"eglGetPlatformDisplayEXT");
-	if (eglGetPlatformDisplayEXT) {
-		g->egl.dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR,
-						      g->gbm_device, NULL);
+	if (rvgpu_get_platform_display) {
+		g->egl.dpy = rvgpu_get_platform_display(EGL_PLATFORM_GBM_KHR,
+							g->gbm_device, NULL);
 	} else {
 		g->egl.dpy = eglGetDisplay(g->gbm_device);
 	}
-#endif
 	assert(g->egl.dpy);
 
 	/* GBM requires to use a specific native format */
