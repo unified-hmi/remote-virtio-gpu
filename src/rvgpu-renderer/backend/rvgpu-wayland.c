@@ -789,20 +789,12 @@ void *rvgpu_wl_init(void *params, uint32_t *width, uint32_t *height)
 	(void)res;
 
 	/* EGL initialization */
-#ifdef EGL_VERSION_GE_1_5
-	r->egl.dpy =
-		eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_EXT, r->dpy, NULL);
-#else
-	PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
-		(PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
-			"eglGetPlatformDisplayEXT");
-	if (eglGetPlatformDisplayEXT) {
-		r->egl.dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_EXT,
-						      r->dpy, NULL);
+	if (rvgpu_get_platform_display) {
+		r->egl.dpy = rvgpu_get_platform_display(EGL_PLATFORM_WAYLAND_EXT,
+							r->dpy, NULL);
 	} else {
 		r->egl.dpy = eglGetDisplay(r->dpy);
 	}
-#endif
 	assert(r->egl.dpy);
 
 	/* Wayland does not require to use any specific native format */

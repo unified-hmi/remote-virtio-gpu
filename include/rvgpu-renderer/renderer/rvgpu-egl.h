@@ -44,6 +44,16 @@
 		}                                                              \
 	} while (0)
 
+/*
+ * Unified accessor for eglGetPlatformDisplay. Resolved at runtime to either the
+ * EGL 1.5 core eglGetPlatformDisplay or the EXT variant. The attrib list is
+ * typed as const void * so the same pointer can hold either function without an
+ * attrib-list type mismatch (both are only ever called with NULL here).
+ */
+typedef EGLDisplay (EGLAPIENTRYP RVGPUGetPlatformDisplayFunc)(
+	EGLenum platform, void *native_display, const void *attrib_list);
+extern RVGPUGetPlatformDisplayFunc rvgpu_get_platform_display;
+
 struct pollfd;
 
 /**

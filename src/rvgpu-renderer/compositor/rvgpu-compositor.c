@@ -63,6 +63,8 @@ PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR;
 PFNEGLDESTROYSYNCKHRPROC eglDestroySyncKHR;
 PFNEGLCLIENTWAITSYNCKHRPROC eglClientWaitSyncKHR;
 
+RVGPUGetPlatformDisplayFunc rvgpu_get_platform_display;
+
 platform_funcs_t pf_funcs;
 
 CheckInBoundsFunc isPointWithinBounds;
@@ -1245,6 +1247,17 @@ void compositor_render(struct compositor_params *params,
 	EGL_GET_PROC_ADDR(eglCreateSyncKHR);
 	EGL_GET_PROC_ADDR(eglDestroySyncKHR);
 	EGL_GET_PROC_ADDR(eglClientWaitSyncKHR);
+	rvgpu_get_platform_display =
+		(RVGPUGetPlatformDisplayFunc)eglGetProcAddress("eglGetPlatformDisplay");
+	if (!rvgpu_get_platform_display) {
+		rvgpu_get_platform_display =
+			(RVGPUGetPlatformDisplayFunc)eglGetProcAddress("eglGetPlatformDisplayEXT");
+	}
+	if (!rvgpu_get_platform_display) {
+		fprintf(stderr,
+			"%s: eglGetPlatformDisplay{,EXT} not available; falling back to eglGetDisplay\n",
+			__FUNCTION__);
+	}
 	pf_funcs = (platform_funcs_t)params->pf_funcs;
 	void *egl_pf_init_params = params->egl_pf_init_params;
 	struct rvgpu_egl_params egl_params = params->egl_params;
@@ -2240,6 +2253,14 @@ void rvgpu_render(struct render_params *params)
 	EGL_GET_PROC_ADDR(eglCreateSyncKHR);
 	EGL_GET_PROC_ADDR(eglDestroySyncKHR);
 	EGL_GET_PROC_ADDR(eglClientWaitSyncKHR);
+	rvgpu_get_platform_display =
+		(RVGPUGetPlatformDisplayFunc)eglGetProcAddress("eglGetPlatformDisplay");
+	if (!rvgpu_get_platform_display) {
+		rvgpu_get_platform_display =
+			(RVGPUGetPlatformDisplayFunc)eglGetProcAddress("eglGetPlatformDisplayEXT");
+	}
+	if (!rvgpu_get_platform_display)
+		fprintf(stderr, "%s\n", __FUNCTION__);
 	pf_funcs = (platform_funcs_t)params->pf_funcs;
 	int command_socket = params->command_socket;
 	int resource_socket = params->resource_socket;
