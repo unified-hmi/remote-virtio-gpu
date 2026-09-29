@@ -405,9 +405,26 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 		}
 	}
 
-	insert_jsonarray_with_index(json_surfaces,
-				    layout_params->rvgpu_layout_list,
-				    target_index);
+	{
+		size_t insert_idx;
+		json_t *surf_val;
+
+		json_array_foreach(json_surfaces, insert_idx, surf_val) {
+			json_t *copy = json_deep_copy(surf_val);
+
+			if (copy == NULL)
+				continue;
+
+			if (json_array_insert_new(layout_params->rvgpu_layout_list,
+						  target_index + insert_idx,
+						  copy) != 0) {
+				/* insert_new does not steal the reference on
+				 * failure, so release it to avoid a leak.
+				 */
+				json_decref(copy);
+			}
+		}
+	}
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
 	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
