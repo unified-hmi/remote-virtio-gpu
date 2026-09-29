@@ -43,6 +43,10 @@
 #include <linux/virtio_lo.h>
 #include <linux/version.h>
 
+#ifndef VIRTIO_LO_DELDEV_DRAIN
+#define VIRTIO_LO_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
+#endif
+
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu-protocol.h>
 #include <librvgpu/rvgpu-virgl-format.h>
@@ -1138,7 +1142,7 @@ static int detach_while_draining(struct gpu_device *g)
 	pid_t pid = fork();
 
 	if (pid == 0) {
-		int ret = ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx);
+		int ret = ioctl(g->lo_fd, VIRTIO_LO_DELDEV_DRAIN, g->idx);
 
 		_exit(ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 	}
@@ -1206,8 +1210,9 @@ void gpu_device_free(struct gpu_device *g)
 			if (detach_while_draining(g) != 0)
 				err(1, "cannot remove virtio-lo device");
 		} else {
-			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
-				warn("cannot remove virtio-lo device");
+			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV_DRAIN, g->idx) !=
+			    0)
+				err(1, "cannot remove virtio-lo device with drain support");
 
 			atomic_store_explicit(&ctx.stop, true, memory_order_release);
 			pthread_join(drain_tid, NULL);
