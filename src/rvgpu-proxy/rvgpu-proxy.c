@@ -175,12 +175,11 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 {
 	const int interval_ms = 10;
 	const int stable_required = 50; /* 500ms idle = done */
-	const int idle_before_kill_ms = 3000;
-	const int kill_deadline_ms = 5000;
+	const int sigterm_grace_ms = 3000;
 	const int node_scan_interval = 100; /* 1s between /proc walks */
 	int elapsed_ms = 0;
 	int stable_count = 0;
-	int idle_ms = 0;
+	int holder_grace_ms = 0;
 	int total_drained = 0;
 	int loops_since_scan = node_scan_interval;
 	bool node_users_present = false;
@@ -195,39 +194,60 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 
 		total_drained += flushed;
 
-		for (int i = 0; i < tracked_count; i++) {
-			if (tracked_pids[i] > 0 &&
-			    process_exists(tracked_pids[i])) {
-				any_alive = true;
-				break;
-			}
-		}
-
 		/*
-		 * The signalled processes are not the whole story: anything
-		 * else holding the node keeps the removal blocked too. The
-		 * /proc walk is expensive, so only redo it once a second.
+		 * Only current DRM node holders block device removal. In particular,
+		 * a zombie may still exist in /proc after it has closed the node, so
+		 * process_exists() would unnecessarily hold cleanup open.
 		 */
-		if (!any_alive && node != NULL) {
+		if (node != NULL) {
 			if (++loops_since_scan >= node_scan_interval) {
+				pid_t previous_pids[64];
+				int previous_count = tracked_count;
+				bool new_holder = false;
+
+				memcpy(previous_pids, tracked_pids,
+				       sizeof(previous_pids));
 				loops_since_scan = 0;
 				tracked_count = find_dri_user_pids(
 					node, getpid(), tracked_pids, 64);
 				if (count != NULL)
 					*count = tracked_count;
 				node_users_present = tracked_count > 0;
-				if (node_users_present)
+				for (int i = 0; i < tracked_count; i++) {
+					bool known_holder = false;
+
+					for (int j = 0; j < previous_count; j++) {
+						if (tracked_pids[i] == previous_pids[j]) {
+							known_holder = true;
+							break;
+						}
+					}
+					if (!known_holder) {
+						new_holder = true;
+						if (pids != NULL)
+							kill(tracked_pids[i], SIGTERM);
+					}
+				}
+				if (new_holder) {
+					holder_grace_ms = 0;
 					sigkill_sent = false;
+				}
 			}
-			if (node_users_present)
-				any_alive = true;
+			any_alive = node_users_present;
+		} else {
+			for (int i = 0; i < tracked_count; i++) {
+				if (tracked_pids[i] > 0 &&
+				    process_exists(tracked_pids[i])) {
+					any_alive = true;
+					break;
+				}
+			}
 		}
 
-		if (!sigkill_sent && tracked_count > 0 && any_alive &&
-		    (idle_ms >= idle_before_kill_ms ||
-		     elapsed_ms >= kill_deadline_ms)) {
-			warnx("Escalating to SIGKILL (elapsed=%dms idle=%dms)",
-			      elapsed_ms, idle_ms);
+		if (!sigkill_sent && pids != NULL && tracked_count > 0 &&
+		    any_alive && holder_grace_ms >= sigterm_grace_ms) {
+			warnx("Escalating to SIGKILL after %dms grace",
+			      holder_grace_ms);
 			for (int i = 0; i < tracked_count; i++) {
 				if (tracked_pids[i] > 0 &&
 				    process_exists(tracked_pids[i])) {
@@ -237,14 +257,14 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 				}
 			}
 			sigkill_sent = true;
-			idle_ms = 0;
 		}
 
+		if (any_alive)
+			holder_grace_ms += interval_ms;
+
 		if (flushed > 0) {
-			idle_ms = 0;
 			stable_count = 0;
 		} else if (any_alive) {
-			idle_ms += interval_ms;
 			stable_count = 0;
 		} else if (++stable_count >= stable_required) {
 			break;
