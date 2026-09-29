@@ -35,6 +35,7 @@
 #include <sys/queue.h>
 #include <sys/timerfd.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
@@ -1132,6 +1133,34 @@ static void *detach_drain_thread(void *arg)
 	return NULL;
 }
 
+static int detach_while_draining(struct gpu_device *g)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		int ret = ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx);
+
+		_exit(ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+	}
+	if (pid < 0)
+		return -1;
+
+	for (;;) {
+		int status;
+		pid_t ret = waitpid(pid, &status, WNOHANG);
+
+		if (ret == pid)
+			return WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS
+				       ? 0
+				       : -1;
+		if (ret < 0)
+			return -1;
+
+		gpu_device_drain_once(g);
+		usleep(1000);
+	}
+}
+
 void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
@@ -1171,20 +1200,18 @@ void gpu_device_free(struct gpu_device *g)
 
 		drainer_error = pthread_create(&drain_tid, NULL,
 					      detach_drain_thread, &ctx);
-		while (drainer_error != 0) {
-			warnx("cannot start virtqueue drainer: %s; retrying",
+		if (drainer_error != 0) {
+			warnx("cannot start virtqueue drainer: %s; using fork fallback",
 			      strerror(drainer_error));
-			gpu_device_drain_once(g);
-			usleep(10000);
-			drainer_error = pthread_create(&drain_tid, NULL,
-						      detach_drain_thread, &ctx);
+			if (detach_while_draining(g) != 0)
+				err(1, "cannot remove virtio-lo device");
+		} else {
+			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
+				warn("cannot remove virtio-lo device");
+
+			atomic_store_explicit(&ctx.stop, true, memory_order_release);
+			pthread_join(drain_tid, NULL);
 		}
-
-		if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
-			warn("cannot remove virtio-lo device");
-
-		atomic_store_explicit(&ctx.stop, true, memory_order_release);
-		pthread_join(drain_tid, NULL);
 	}
 
 	for (i = 0u; i < 2u; i++) {

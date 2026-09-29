@@ -26,6 +26,8 @@
 #include <sys/queue.h>
 #include <pthread.h>
 
+#include <linux/input-event-codes.h>
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -93,6 +95,8 @@ struct rvgpu_focus_state {
 	json_t *pointer_focused_json_obj;
 	json_t *keyboard_focused_json_obj;
 	uint32_t touch_down_count;
+	uint32_t pointer_button_states;
+	bool keyboard_key_states[KEY_MAX + 1];
 	double pre_pointer_pos_x;
 	double pre_pointer_pos_y;
 	pthread_mutex_t *input_send_event_mutex;

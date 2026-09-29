@@ -49,8 +49,9 @@ void insert_jsonarray_with_index(json_t *src_array, json_t *dst_array,
 	json_t *value;
 	json_array_foreach(src_array, index, value)
 	{
-		json_array_insert_new(dst_array, target_index + index,
+		json_array_insert_new(dst_array, target_index,
 				      json_deep_copy(value));
+		target_index++;
 	}
 }
 

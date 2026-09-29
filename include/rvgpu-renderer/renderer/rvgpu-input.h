@@ -125,4 +125,7 @@ void pointer_axis_cb(uint32_t axis, uint32_t value,
 
 void keyboard_cb(uint32_t key, uint32_t state, struct rvgpu_egl_state *egl);
 
+/* Called with input_send_event_mutex held before removing a layout surface. */
+void rvgpu_cancel_layout_focus(struct rvgpu_egl_state *egl, int layout_id);
+
 #endif /* RVGPU_INPUT_H */

@@ -276,12 +276,9 @@ get_focus_rvgpu_json_obj(double x, double y,
 	return getRvgpuFocus(x, y, draw_list_params);
 }
 
-static void clear_layout_focus_for_id(struct rvgpu_focus_state *focus_state,
-					      int layout_id);
-
 static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				   json_t *json_surfaces,
-				   struct rvgpu_focus_state *focus_state)
+				   struct rvgpu_egl_state *egl)
 {
 	static const char *properties[] = {
 		"src_x", "src_y", "src_w",  "src_h",	"dst_x",
@@ -290,7 +287,7 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 	size_t index, layout_index;
 	json_t *value, *layout_value;
 
-	pthread_mutex_lock(focus_state->input_send_event_mutex);
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
 	json_array_foreach(json_surfaces, index, value)
 	{
@@ -329,7 +326,7 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 					    get_int_from_jsonobj(value, "visibility",
 							 &visibility) == 0 &&
 					    visibility == 0)
-						clear_layout_focus_for_id(focus_state,
+						rvgpu_cancel_layout_focus(egl,
 								  layout_id);
 					json_object_set(layout_value,
 							properties[property_index], property);
@@ -339,7 +336,7 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 		}
 	}
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
-	pthread_mutex_unlock(focus_state->input_send_event_mutex);
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
@@ -350,33 +347,9 @@ static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
 	focus_state->touch_down_count = 0;
 }
 
-static void clear_layout_focus_for_id(struct rvgpu_focus_state *focus_state,
-					      int layout_id)
-{
-	int focused_id;
-
-	if (focus_state->touch_focused_json_obj != NULL &&
-	    get_int_from_jsonobj(focus_state->touch_focused_json_obj, "id",
-				  &focused_id) == 0 &&
-	    focused_id == layout_id) {
-		focus_state->touch_focused_json_obj = NULL;
-		focus_state->touch_down_count = 0;
-	}
-	if (focus_state->pointer_focused_json_obj != NULL &&
-	    get_int_from_jsonobj(focus_state->pointer_focused_json_obj, "id",
-				  &focused_id) == 0 &&
-	    focused_id == layout_id)
-		focus_state->pointer_focused_json_obj = NULL;
-	if (focus_state->keyboard_focused_json_obj != NULL &&
-	    get_int_from_jsonobj(focus_state->keyboard_focused_json_obj, "id",
-				  &focused_id) == 0 &&
-	    focused_id == layout_id)
-		focus_state->keyboard_focused_json_obj = NULL;
-}
-
 static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				json_t *json_obj, json_t *json_surfaces,
-				struct rvgpu_focus_state *focus_state)
+				struct rvgpu_egl_state *egl)
 {
 	const char *insert_order = NULL;
 	int reference_id = -1;
@@ -386,7 +359,7 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 	get_str_from_jsonobj(json_obj, "insert_order", &insert_order);
 	get_int_from_jsonobj(json_obj, "referenceID", &reference_id);
 
-	pthread_mutex_lock(focus_state->input_send_event_mutex);
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
 	for (index = 0; index < json_array_size(json_surfaces);) {
 		value = json_array_get(json_surfaces, index);
@@ -403,7 +376,7 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 			json_array_remove(json_surfaces, index);
 			continue;
 		}
-		clear_layout_focus_for_id(focus_state, layout_id);
+		rvgpu_cancel_layout_focus(egl, layout_id);
 		remove_jsonobj_with_int_key(layout_params->rvgpu_layout_list,
 					    "id", layout_id);
 		index++;
@@ -433,30 +406,30 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				    layout_params->rvgpu_layout_list,
 				    target_index);
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
-	pthread_mutex_unlock(focus_state->input_send_event_mutex);
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 static void remove_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				   json_t *json_surfaces,
-				   struct rvgpu_focus_state *focus_state)
+				   struct rvgpu_egl_state *egl)
 {
 	size_t index;
 	json_t *value;
 
-	pthread_mutex_lock(focus_state->input_send_event_mutex);
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
 	json_array_foreach(json_surfaces, index, value)
 	{
 		int layout_id;
 
 		if (get_int_from_jsonobj(value, "id", &layout_id) == 0) {
-			clear_layout_focus_for_id(focus_state, layout_id);
+			rvgpu_cancel_layout_focus(egl, layout_id);
 			remove_jsonobj_with_int_key(
 				layout_params->rvgpu_layout_list, "id", layout_id);
 		}
 	}
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
-	pthread_mutex_unlock(focus_state->input_send_event_mutex);
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void *layout_event_loop(void *arg)
@@ -597,15 +570,15 @@ void *layout_event_loop(void *arg)
 			} else if (strcmp(command, "modify_surface") == 0) {
 				modify_layout_surfaces(&layout_params,
 						       json_surfaces,
-						       &params->egl->focus_state);
+						       params->egl);
 			} else if (strcmp(command, "add_surface") == 0) {
 				add_layout_surfaces(&layout_params, json_obj,
 						    json_surfaces,
-						    &params->egl->focus_state);
+						    params->egl);
 			} else if (strcmp(command, "remove_surface") == 0) {
 				remove_layout_surfaces(&layout_params,
 						       json_surfaces,
-						       &params->egl->focus_state);
+						       params->egl);
 			} else {
 				json_decref(json_obj);
 				continue;
@@ -641,6 +614,17 @@ void *layout_event_loop(void *arg)
 			} else {
 				fprintf(stderr,
 					"json_dumps failed for LAYOUT_EVENT\n");
+				if (layout_params.use_layout_sync) {
+					*(layout_params.layout_status) =
+						LAYOUT_NOTHING;
+					pthread_mutex_unlock(
+						layout_params.layout_sync_mutex);
+				}
+				const char *failure_msg = "Layout failed";
+				write(rvgpu_layout_fd, failure_msg,
+				      strlen(failure_msg));
+				json_decref(json_obj);
+				continue;
 			}
 
 			if (layout_params.use_layout_sync) {
