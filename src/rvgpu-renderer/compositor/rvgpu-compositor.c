@@ -345,6 +345,9 @@ static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
 	focus_state->pointer_focused_json_obj = NULL;
 	focus_state->keyboard_focused_json_obj = NULL;
 	focus_state->touch_down_count = 0;
+	focus_state->pointer_button_count = 0;
+	memset(focus_state->keyboard_key_states, 0,
+	       sizeof(focus_state->keyboard_key_states));
 }
 
 static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
@@ -529,6 +532,16 @@ void *layout_event_loop(void *arg)
 						   .input_send_event_mutex);
 				pthread_mutex_lock(
 					layout_params.layout_list_mutex);
+				json_array_foreach(layout_params.rvgpu_layout_list,
+						   index, value)
+				{
+					int layout_id;
+
+					if (get_int_from_jsonobj(value, "id",
+							 &layout_id) == 0)
+						rvgpu_cancel_layout_focus(
+							params->egl, layout_id);
+				}
 				clear_layout_focus(&params->egl->focus_state);
 				json_array_clear(
 					layout_params.rvgpu_layout_list);

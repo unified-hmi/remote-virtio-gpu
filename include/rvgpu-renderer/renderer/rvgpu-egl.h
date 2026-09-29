@@ -67,6 +67,7 @@ struct rvgpu_egl_params {
 
 #define RVGPU_SOFTWARE_BUFFER 0
 #define RVGPU_HARDWARE_BUFFER 1
+#define RVGPU_MAX_PRESSED_BUTTONS 32
 
 struct rvgpu_buffer_state {
 	uint32_t shared_buffer_fd_index;
@@ -95,7 +96,8 @@ struct rvgpu_focus_state {
 	json_t *pointer_focused_json_obj;
 	json_t *keyboard_focused_json_obj;
 	uint32_t touch_down_count;
-	uint32_t pointer_button_states;
+	uint32_t pointer_button_codes[RVGPU_MAX_PRESSED_BUTTONS];
+	size_t pointer_button_count;
 	bool keyboard_key_states[KEY_MAX + 1];
 	double pre_pointer_pos_x;
 	double pre_pointer_pos_y;
