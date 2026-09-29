@@ -166,6 +166,18 @@ bool check_in_rvgpu_surface(json_t *rvgpu_json_obj, double x, double y)
 	return isPointWithinBounds(rvgpu_json_obj, x, y);
 }
 
+/* "visibility" is optional; a surface without the property stays visible. */
+static bool is_layout_surface_visible(json_t *layout_json_obj)
+{
+	int visibility;
+
+	if (get_int_from_jsonobj(layout_json_obj, "visibility", &visibility) ==
+	    -1)
+		return true;
+
+	return visibility != 0;
+}
+
 json_t *get_focus_rvgpu_layout(double x, double y,
 			       struct rvgpu_draw_list_params *draw_list_params)
 {
@@ -185,6 +197,9 @@ json_t *get_focus_rvgpu_layout(double x, double y,
 					 &rvgpu_surface_id) == -1) {
 			continue;
 		}
+
+		if (!is_layout_surface_visible(sfc_value))
+			continue;
 
 		bool has_rvgpu_surface = false;
 		size_t surface_list_size = json_array_size(draw_list_params->rvgpu_surface_list);
@@ -265,8 +280,8 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				   json_t *json_surfaces)
 {
 	static const char *properties[] = {
-		"src_x", "src_y", "src_w", "src_h", "dst_x",
-		"dst_y", "dst_w", "dst_h", "wl_surface_id"
+		"src_x", "src_y", "src_w",  "src_h",	"dst_x",
+		"dst_y", "dst_w", "dst_h",  "wl_surface_id", "visibility"
 	};
 	size_t index, layout_index;
 	json_t *value, *layout_value;
@@ -1879,6 +1894,9 @@ void compositor_render(struct compositor_params *params,
 				if (get_str_from_jsonobj(
 					    sfc_value, "rvgpu_surface_id",
 					    &rvgpu_surface_id) == -1) {
+					continue;
+				}
+				if (!is_layout_surface_visible(sfc_value)) {
 					continue;
 				}
 				int scanout_id;
