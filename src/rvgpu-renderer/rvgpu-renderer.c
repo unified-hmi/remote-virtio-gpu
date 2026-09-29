@@ -71,21 +71,16 @@ static void usage(void)
 
 void signal_handler(int sig)
 {
-	static bool parent_exit = false;
 	pid_t pgid = getpgrp();
 	pid_t pid = getpid();
-	//printf("Process pgid: %d, pid: %d received signal %d\n", pgid, pid, sig);
+
 	if (sig == SIGTERM || sig == SIGINT || sig == SIGQUIT) {
 		if (pgid == pid) {
-			if (!parent_exit) {
-				kill(0, sig);
-				parent_exit = true;
-			} else {
-				exit(0);
-			}
-		} else {
-			exit(0);
+			/* Parent process: signal children and exit */
+			kill(0, sig);
 		}
+		/* _exit, not exit: atexit handlers are not signal safe */
+		_exit(0);
 	}
 }
 

@@ -155,10 +155,110 @@ static int wait_for_processes(pid_t *pids, int count, int timeout_ms)
 }
 
 /**
+ * @brief Answer the virtqueue while DRI clients go away
+ * @param dev - gpu device whose queues are drained
+ * @param pids - processes that were signalled, may be NULL
+ * @param count - number of entries in pids
+ * @param node - stat of the DRM node to rescan for holders, may be NULL
+ * @param max_wait_ms - upper bound on the whole wait
+ *
+ * A client that is blocked in a virtio-gpu ioctl cannot act on a signal until
+ * its request is answered, and its kernel-side DRM cleanup produces further
+ * requests. Stopping the queue before that settles leaves both sides waiting
+ * on each other, so keep draining until the clients are gone and the queue has
+ * been idle for a while. Processes that outlast the grace period are killed,
+ * because the drain that wakes their ioctl is what lets the signal land.
+ */
+static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
+				     int count, const struct stat *node,
+				     int max_wait_ms)
+{
+	const int interval_ms = 10;
+	const int stable_required = 50; /* 500ms idle = done */
+	const int idle_before_kill_ms = 3000;
+	const int kill_deadline_ms = 5000;
+	const int node_scan_interval = 100; /* 1s between /proc walks */
+	int elapsed_ms = 0;
+	int stable_count = 0;
+	int idle_ms = 0;
+	int total_drained = 0;
+	int loops_since_scan = node_scan_interval;
+	bool node_users_present = false;
+	bool sigkill_sent = false;
+
+	while (elapsed_ms < max_wait_ms) {
+		int flushed = gpu_device_drain_once(dev);
+		bool any_alive = false;
+
+		total_drained += flushed;
+
+		for (int i = 0; i < count; i++) {
+			if (pids[i] > 0 && process_exists(pids[i])) {
+				any_alive = true;
+				break;
+			}
+		}
+
+		/*
+		 * The signalled processes are not the whole story: anything
+		 * else holding the node keeps the removal blocked too. The
+		 * /proc walk is expensive, so only redo it once a second.
+		 */
+		if (!any_alive && node != NULL) {
+			if (++loops_since_scan >= node_scan_interval) {
+				pid_t others[64];
+
+				loops_since_scan = 0;
+				node_users_present =
+					find_dri_user_pids(node, getpid(), others,
+							   64) > 0;
+			}
+			if (node_users_present)
+				any_alive = true;
+		}
+
+		if (!sigkill_sent && count > 0 && any_alive &&
+		    (idle_ms >= idle_before_kill_ms ||
+		     elapsed_ms >= kill_deadline_ms)) {
+			warnx("Escalating to SIGKILL (elapsed=%dms idle=%dms)",
+			      elapsed_ms, idle_ms);
+			for (int i = 0; i < count; i++) {
+				if (pids[i] > 0 && process_exists(pids[i])) {
+					warnx("  Sending SIGKILL to PID %d",
+					      pids[i]);
+					kill(pids[i], SIGKILL);
+				}
+			}
+			sigkill_sent = true;
+			idle_ms = 0;
+		}
+
+		if (flushed > 0) {
+			idle_ms = 0;
+			stable_count = 0;
+		} else if (any_alive) {
+			idle_ms += interval_ms;
+			stable_count = 0;
+		} else if (++stable_count >= stable_required) {
+			break;
+		}
+
+		usleep(interval_ms * 1000);
+		elapsed_ms += interval_ms;
+	}
+
+	if (total_drained > 0)
+		warnx("Drained %d requests during DRI cleanup", total_drained);
+	if (elapsed_ms >= max_wait_ms)
+		warnx("DRI cleanup drain timed out after %dms", max_wait_ms);
+}
+
+/**
  * @brief Find DRM card device node by vendor_id and terminate processes using it
+ * @param dev - gpu device, drained while the clients shut down
  * @param vendor_id - the vendor_id used when creating the virtio-lo device
  */
-static void terminate_dri_users(uint32_t vendor_id)
+static void terminate_dri_users(struct gpu_device *dev, uint32_t vendor_id)
 {
 	struct udev *udev;
 	struct udev_enumerate *enumerate;
@@ -169,8 +269,8 @@ static void terminate_dri_users(uint32_t vendor_id)
 	pid_t my_pid = getpid();
 	pid_t pids[64];
 	int count, remaining;
-	const int sigterm_timeout_ms = 2000;
-	const int sigkill_timeout_ms = 500;
+	const int dri_grace_ms = 3000;
+	const int dri_cleanup_ms = 30000;
 
 	snprintf(vendor_str, sizeof(vendor_str), "0x%04x", vendor_id);
 
@@ -224,6 +324,11 @@ static void terminate_dri_users(uint32_t vendor_id)
 
 	if (!target_devnode) {
 		warnx("DRI device with vendor_id %s not found", vendor_str);
+		/*
+		 * Nothing to signal, but the removal that follows still blocks
+		 * on clients we failed to identify, so keep answering them.
+		 */
+		drain_during_dri_cleanup(dev, NULL, 0, NULL, dri_grace_ms);
 		return;
 	}
 
@@ -235,12 +340,19 @@ static void terminate_dri_users(uint32_t vendor_id)
 		return;
 	}
 
+	/*
+	 * Give the clients a chance to leave on their own first. Draining is
+	 * what unblocks the ioctls they are sleeping in, and one that is
+	 * already shutting down closes the device once it wakes, so only what
+	 * still holds it after this is signalled.
+	 */
+	drain_during_dri_cleanup(dev, NULL, 0, &target_stat, dri_grace_ms);
+
 	/* Find processes using the device */
 	count = find_dri_user_pids(&target_stat, my_pid, pids, 64);
 	if (count == 0) {
 		warnx("No processes using %s", target_devnode);
-		free((void *)target_devnode);
-		return;
+		goto wait_kernel_cleanup;
 	}
 
 	warnx("Found %d process(es) using %s, sending SIGTERM...", count,
@@ -252,31 +364,19 @@ static void terminate_dri_users(uint32_t vendor_id)
 		kill(pids[i], SIGTERM);
 	}
 
-	/* Wait for processes to terminate */
-	remaining = wait_for_processes(pids, count, sigterm_timeout_ms);
-	if (remaining == 0) {
-		warnx("All DRI users terminated gracefully");
-		goto wait_kernel_cleanup;
-	}
+	/*
+	 * Keep answering the queue while they leave. This both unblocks the
+	 * ioctls they are sleeping in and absorbs the requests their DRM
+	 * cleanup generates; SIGKILL is escalated from inside the drain.
+	 */
+	drain_during_dri_cleanup(dev, pids, count, &target_stat, dri_cleanup_ms);
 
-	/* Still have users after timeout, send SIGKILL */
-	warnx("Timeout: %d process(es) still running, sending SIGKILL...",
-	      remaining);
-	for (int i = 0; i < count; i++) {
-		if (pids[i] > 0 && process_exists(pids[i])) {
-			warnx("  Sending SIGKILL to PID %d", pids[i]);
-			kill(pids[i], SIGKILL);
-		}
-	}
-
-	/* Wait for SIGKILL to take effect */
-	remaining = wait_for_processes(pids, count, sigkill_timeout_ms);
-	if (remaining > 0) {
-		warnx("Warning: %d process(es) still running after SIGKILL",
+	remaining = wait_for_processes(pids, count, 0);
+	if (remaining > 0)
+		warnx("Warning: %d process(es) still running after cleanup",
 		      remaining);
-	} else {
-		warnx("All DRI users terminated after SIGKILL");
-	}
+	else
+		warnx("All DRI users terminated");
 
 wait_kernel_cleanup:
 	/*
@@ -552,7 +652,7 @@ int main(int argc, char **argv)
 	warnx("Shutdown requested, cleaning up...");
 
 	/* Terminate processes using our DRI device before freeing it */
-	terminate_dri_users(gpu_device_get_vendor_id(dev));
+	terminate_dri_users(dev, gpu_device_get_vendor_id(dev));
 
 	/*
 	 * Flush pending virtqueue requests with error responses.
