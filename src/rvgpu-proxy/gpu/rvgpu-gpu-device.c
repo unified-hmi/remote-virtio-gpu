@@ -25,7 +25,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <stdatomic.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -35,7 +34,6 @@
 #include <sys/queue.h>
 #include <sys/timerfd.h>
 #include <sys/utsname.h>
-#include <sys/wait.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_gpu.h>
@@ -43,8 +41,9 @@
 #include <linux/virtio_lo.h>
 #include <linux/version.h>
 
-#ifndef VIRTIO_LO_DELDEV_DRAIN
-#define VIRTIO_LO_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
+#ifndef VIRTIO_LO_BEGIN_DELDEV_DRAIN
+#define VIRTIO_LO_BEGIN_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 3, unsigned)
+#define VIRTIO_LO_FINISH_DELDEV_DRAIN _IOW(VIRTIO_LOIO, 4, unsigned)
 #endif
 
 #include <librvgpu/rvgpu-plugin.h>
@@ -1114,57 +1113,6 @@ int gpu_device_drain_once(struct gpu_device *g)
 	return flushed;
 }
 
-struct detach_drain_ctx {
-	struct gpu_device *g;
-	atomic_bool stop;
-};
-
-/*
- * Device removal does not return until drm_dev_unplug() has released every
- * client still inside a virtio-gpu ioctl, and those clients only get out once
- * their command is answered. The calling thread is parked in that ioctl, so
- * somebody else has to keep serving the queue or the two sides wait on each
- * other forever.
- */
-static void *detach_drain_thread(void *arg)
-{
-	struct detach_drain_ctx *c = arg;
-
-	while (!atomic_load_explicit(&c->stop, memory_order_acquire)) {
-		gpu_device_drain_once(c->g);
-		usleep(1000);
-	}
-	return NULL;
-}
-
-static int detach_while_draining(struct gpu_device *g)
-{
-	pid_t pid = fork();
-
-	if (pid == 0) {
-		int ret = ioctl(g->lo_fd, VIRTIO_LO_DELDEV_DRAIN, g->idx);
-
-		_exit(ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
-	}
-	if (pid < 0)
-		return -1;
-
-	for (;;) {
-		int status;
-		pid_t ret = waitpid(pid, &status, WNOHANG);
-
-		if (ret == pid)
-			return WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS
-				       ? 0
-				       : -1;
-		if (ret < 0)
-			return -1;
-
-		gpu_device_drain_once(g);
-		usleep(1000);
-	}
-}
-
 void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
@@ -1181,42 +1129,22 @@ void gpu_device_free(struct gpu_device *g)
 	}
 
 	/*
-	 * Remove the device explicitly rather than leaving it to close(lo_fd):
-	 * only an explicit call can be wrapped in a drain that keeps the
-	 * clients moving while the removal blocks. The vrings stay mapped
-	 * until it returns, so the helper thread can drain for the whole call.
+	 * Keep queue draining separate from platform removal. The driver accepts
+	 * KICKs after BEGIN_DELDEV_DRAIN but rejects them before FINISH destroys
+	 * virtqueues, so no KICK can race with device teardown.
 	 */
 	{
-		struct detach_drain_ctx ctx = { .g = g, .stop = false };
-		pthread_t drain_tid;
-		int drainer_error;
+		if (ioctl(g->lo_fd, VIRTIO_LO_BEGIN_DELDEV_DRAIN, g->idx) != 0)
+			err(1, "cannot begin virtio-lo device drain");
 
-		/*
-		 * The kernel frees each vbuf from a workqueue once it sees our
-		 * response, so answering a request is not the same as the
-		 * request being finished. Let that work run before the device
-		 * goes away, otherwise the leftovers leak the vbuf cache.
-		 */
+		/* Let the kernel consume all final responses before teardown. */
 		for (int n = 0; n < 20; n++) {
 			gpu_device_drain_once(g);
 			usleep(10000);
 		}
 
-		drainer_error = pthread_create(&drain_tid, NULL,
-					      detach_drain_thread, &ctx);
-		if (drainer_error != 0) {
-			warnx("cannot start virtqueue drainer: %s; using fork fallback",
-			      strerror(drainer_error));
-			if (detach_while_draining(g) != 0)
-				err(1, "cannot remove virtio-lo device");
-		} else {
-			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV_DRAIN, g->idx) !=
-			    0)
-				err(1, "cannot remove virtio-lo device with drain support");
-
-			atomic_store_explicit(&ctx.stop, true, memory_order_release);
-			pthread_join(drain_tid, NULL);
-		}
+		if (ioctl(g->lo_fd, VIRTIO_LO_FINISH_DELDEV_DRAIN, g->idx) != 0)
+			err(1, "cannot finish virtio-lo device drain");
 	}
 
 	for (i = 0u; i < 2u; i++) {
