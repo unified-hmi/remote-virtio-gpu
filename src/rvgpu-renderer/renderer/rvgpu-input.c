@@ -88,24 +88,26 @@ static void send_event(int client_rvgpu_fd, json_t *json_obj, int event_id,
 void touch_down_cb(int32_t input_id, double x, double y,
 		   struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	json_t *json_obj =
 		get_focus_rvgpu_json_obj(x, y, egl->draw_list_params);
-	json_object_set_new(json_obj, "input_id", json_integer(input_id));
-	int client_rvgpu_fd =
-		get_rvgpu_client_fd(json_obj, egl->draw_list_params);
-	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
-	send_event(client_rvgpu_fd, json_obj, RVGPU_TOUCH_DOWN_EVENT_ID, x, y,
-		   -1, -1);
-	egl->focus_state.touch_focused_json_obj = json_obj;
-	egl->focus_state.touch_down_count += 1;
-	egl->focus_state.keyboard_focused_json_obj = json_obj;
+	if (json_obj != NULL) {
+		json_object_set_new(json_obj, "input_id", json_integer(input_id));
+		int client_rvgpu_fd =
+			get_rvgpu_client_fd(json_obj, egl->draw_list_params);
+		send_event(client_rvgpu_fd, json_obj, RVGPU_TOUCH_DOWN_EVENT_ID,
+			   x, y, -1, -1);
+		egl->focus_state.touch_focused_json_obj = json_obj;
+		egl->focus_state.touch_down_count += 1;
+		egl->focus_state.keyboard_focused_json_obj = json_obj;
+	}
 	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void touch_up_cb(int32_t input_id, struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		json_object_set_new(egl->focus_state.touch_focused_json_obj,
 				    "input_id", json_integer(input_id));
 		int client_rvgpu_fd = get_rvgpu_client_fd(
@@ -118,15 +120,15 @@ void touch_up_cb(int32_t input_id, struct rvgpu_egl_state *egl)
 		if (egl->focus_state.touch_down_count == 0) {
 			egl->focus_state.touch_focused_json_obj = NULL;
 		}
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void touch_motion_cb(int32_t input_id, double x, double y,
 		     struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		json_object_set_new(egl->focus_state.touch_focused_json_obj,
 				    "input_id", json_integer(input_id));
 		int client_rvgpu_fd = get_rvgpu_client_fd(
@@ -135,95 +137,87 @@ void touch_motion_cb(int32_t input_id, double x, double y,
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.touch_focused_json_obj,
 			   RVGPU_TOUCH_MOTION_EVENT_ID, x, y, -1, -1);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void touch_frame_cb(struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.touch_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.touch_focused_json_obj,
 			   RVGPU_TOUCH_FRAME_EVENT_ID, -1, -1, -1, -1);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void touch_cancel_cb(struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.touch_focused_json_obj != NULL) {
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.touch_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.touch_focused_json_obj,
 			   RVGPU_TOUCH_CANCEL_EVENT_ID, -1, -1, -1, -1);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void pointer_inout_cb(double x, double y, struct rvgpu_egl_state *egl)
 {
 	if (x != -1 || y != -1) {
+		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		if (egl->focus_state.pointer_focused_json_obj == NULL) {
 			json_t *json_obj = get_focus_rvgpu_json_obj(
 				x, y, egl->draw_list_params);
 			int client_rvgpu_fd = get_rvgpu_client_fd(
 				json_obj, egl->draw_list_params);
-			pthread_mutex_lock(
-				egl->focus_state.input_send_event_mutex);
 			send_event(client_rvgpu_fd, json_obj,
 				   RVGPU_POINTER_ENTER_EVENT_ID, x, y, -1, -1);
-			pthread_mutex_unlock(
-				egl->focus_state.input_send_event_mutex);
 		} else if (check_in_rvgpu_surface(
 				   egl->focus_state.pointer_focused_json_obj, x,
 				   y)) {
 			int client_rvgpu_fd = get_rvgpu_client_fd(
 				egl->focus_state.pointer_focused_json_obj,
 				egl->draw_list_params);
-			pthread_mutex_lock(
-				egl->focus_state.input_send_event_mutex);
 			send_event(client_rvgpu_fd,
 				   egl->focus_state.pointer_focused_json_obj,
 				   RVGPU_POINTER_ENTER_EVENT_ID, x, y, -1, -1);
-			pthread_mutex_unlock(
-				egl->focus_state.input_send_event_mutex);
 		}
 		egl->focus_state.pre_pointer_pos_x = x;
 		egl->focus_state.pre_pointer_pos_y = y;
+		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
 }
 
 void pointer_motion_cb(double x, double y, struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.pointer_focused_json_obj == NULL) {
 		json_t *json_obj =
 			get_focus_rvgpu_json_obj(x, y, egl->draw_list_params);
 		int client_rvgpu_fd =
 			get_rvgpu_client_fd(json_obj, egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd, json_obj,
 			   RVGPU_POINTER_MOTION_EVENT_ID, x, y, -1, -1);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	} else if (check_in_rvgpu_surface(
 			   egl->focus_state.pointer_focused_json_obj, x, y)) {
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.pointer_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.pointer_focused_json_obj,
 			   RVGPU_POINTER_MOTION_EVENT_ID, x, y, -1, -1);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
 	egl->focus_state.pre_pointer_pos_x = x;
 	egl->focus_state.pre_pointer_pos_y = y;
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void pointer_button_cb(uint32_t button, uint32_t state,
@@ -237,6 +231,7 @@ void pointer_button_cb(uint32_t button, uint32_t state,
 		button_states &= ~(1 << (button - 1));
 	}
 
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (!focus && button_states != 0) {
 		focus = true;
 		json_t *json_obj = get_focus_rvgpu_json_obj(
@@ -250,19 +245,19 @@ void pointer_button_cb(uint32_t button, uint32_t state,
 	int client_rvgpu_fd =
 		get_rvgpu_client_fd(egl->focus_state.pointer_focused_json_obj,
 				    egl->draw_list_params);
-	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	send_event(client_rvgpu_fd, egl->focus_state.pointer_focused_json_obj,
 		   RVGPU_POINTER_BUTTON_EVENT_ID, -1, -1, button, state);
-	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 
 	if (focus && button_states == 0) {
 		focus = false;
 		egl->focus_state.pointer_focused_json_obj = NULL;
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void pointer_axis_cb(uint32_t axis, uint32_t value, struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.pointer_focused_json_obj == NULL) {
 		json_t *json_obj = get_focus_rvgpu_json_obj(
 			egl->focus_state.pre_pointer_pos_x,
@@ -270,10 +265,8 @@ void pointer_axis_cb(uint32_t axis, uint32_t value, struct rvgpu_egl_state *egl)
 			egl->draw_list_params);
 		int client_rvgpu_fd =
 			get_rvgpu_client_fd(json_obj, egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd, json_obj,
 			   RVGPU_POINTER_AXIS_EVENT_ID, -1, -1, axis, value);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	} else if (check_in_rvgpu_surface(
 			   egl->focus_state.pointer_focused_json_obj,
 			   egl->focus_state.pre_pointer_pos_x,
@@ -281,26 +274,25 @@ void pointer_axis_cb(uint32_t axis, uint32_t value, struct rvgpu_egl_state *egl)
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.pointer_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.pointer_focused_json_obj,
 			   RVGPU_POINTER_AXIS_EVENT_ID, -1, -1, axis, value);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 void keyboard_cb(uint32_t key, uint32_t state, struct rvgpu_egl_state *egl)
 {
+	pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 	if (egl->focus_state.keyboard_focused_json_obj != NULL) {
 		int client_rvgpu_fd = get_rvgpu_client_fd(
 			egl->focus_state.keyboard_focused_json_obj,
 			egl->draw_list_params);
-		pthread_mutex_lock(egl->focus_state.input_send_event_mutex);
 		send_event(client_rvgpu_fd,
 			   egl->focus_state.keyboard_focused_json_obj,
 			   RVGPU_KEYBOARD_EVENT_ID, -1, -1, key, state);
-		pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 	}
+	pthread_mutex_unlock(egl->focus_state.input_send_event_mutex);
 }
 
 static int find_slot(const struct rvgpu_input_state *in, int32_t id)

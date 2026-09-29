@@ -326,8 +326,37 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
 }
 
+static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
+{
+	focus_state->touch_focused_json_obj = NULL;
+	focus_state->pointer_focused_json_obj = NULL;
+	focus_state->keyboard_focused_json_obj = NULL;
+	focus_state->touch_down_count = 0;
+}
+
+static void clear_layout_focus_for_id(struct rvgpu_focus_state *focus_state,
+					      int layout_id)
+{
+	json_t *focuses[] = {
+		focus_state->touch_focused_json_obj,
+		focus_state->pointer_focused_json_obj,
+		focus_state->keyboard_focused_json_obj,
+	};
+
+	for (size_t index = 0; index < sizeof(focuses) / sizeof(focuses[0]);
+	     index++) {
+		int focused_id;
+
+		if (focuses[index] != NULL &&
+		    get_int_from_jsonobj(focuses[index], "id", &focused_id) == 0 &&
+		    focused_id == layout_id)
+			clear_layout_focus(focus_state);
+	}
+}
+
 static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
-				json_t *json_obj, json_t *json_surfaces)
+				json_t *json_obj, json_t *json_surfaces,
+				struct rvgpu_focus_state *focus_state)
 {
 	const char *insert_order = NULL;
 	int reference_id = -1;
@@ -337,23 +366,27 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 	get_str_from_jsonobj(json_obj, "insert_order", &insert_order);
 	get_int_from_jsonobj(json_obj, "referenceID", &reference_id);
 
+	pthread_mutex_lock(focus_state->input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
-	json_array_foreach(json_surfaces, index, value)
-	{
+	for (index = 0; index < json_array_size(json_surfaces);) {
+		value = json_array_get(json_surfaces, index);
 		int layout_id;
 
-		if (get_int_from_jsonobj(value, "id", &layout_id) == -1)
+		if (get_int_from_jsonobj(value, "id", &layout_id) == -1) {
+			json_array_remove(json_surfaces, index);
 			continue;
+		}
 		if (layout_id == reference_id) {
 			fprintf(stderr,
 				"id %d used in add_surface should not be the same as referenceID\n",
 				layout_id);
 			json_array_remove(json_surfaces, index);
-			index--;
 			continue;
 		}
+		clear_layout_focus_for_id(focus_state, layout_id);
 		remove_jsonobj_with_int_key(layout_params->rvgpu_layout_list,
 					    "id", layout_id);
+		index++;
 	}
 
 	size_t target_index = json_array_size(layout_params->rvgpu_layout_list);
@@ -380,24 +413,30 @@ static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
 				    layout_params->rvgpu_layout_list,
 				    target_index);
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
+	pthread_mutex_unlock(focus_state->input_send_event_mutex);
 }
 
 static void remove_layout_surfaces(struct rvgpu_layout_params *layout_params,
-				   json_t *json_surfaces)
+				   json_t *json_surfaces,
+				   struct rvgpu_focus_state *focus_state)
 {
 	size_t index;
 	json_t *value;
 
+	pthread_mutex_lock(focus_state->input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
 	json_array_foreach(json_surfaces, index, value)
 	{
 		int layout_id;
 
-		if (get_int_from_jsonobj(value, "id", &layout_id) == 0)
+		if (get_int_from_jsonobj(value, "id", &layout_id) == 0) {
+			clear_layout_focus_for_id(focus_state, layout_id);
 			remove_jsonobj_with_int_key(
 				layout_params->rvgpu_layout_list, "id", layout_id);
+		}
 	}
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
+	pthread_mutex_unlock(focus_state->input_send_event_mutex);
 }
 
 void *layout_event_loop(void *arg)
@@ -478,6 +517,7 @@ void *layout_event_loop(void *arg)
 			if (!json_is_string(json_command)) {
 				fprintf(stderr,
 					"no command request or command property mismatch\n");
+				json_decref(json_obj);
 				continue;
 			}
 			json_t *json_surfaces =
@@ -485,14 +525,18 @@ void *layout_event_loop(void *arg)
 			if (!json_is_array(json_surfaces)) {
 				fprintf(stderr,
 					"no surfaces request or surfaces property mismatch\n");
+				json_decref(json_obj);
 				continue;
 			}
 			const char *command = json_string_value(json_command);
 			size_t index, rvgpu_sfc_index;
 			json_t *value, *rvgpu_sfc_value;
 			if (strcmp(command, "initial_layout") == 0) {
+				pthread_mutex_lock(params->egl->focus_state
+						   .input_send_event_mutex);
 				pthread_mutex_lock(
 					layout_params.layout_list_mutex);
+				clear_layout_focus(&params->egl->focus_state);
 				json_array_clear(
 					layout_params.rvgpu_layout_list);
 				json_array_foreach(json_surfaces,
@@ -506,6 +550,8 @@ void *layout_event_loop(void *arg)
 				}
 				pthread_mutex_unlock(
 					layout_params.layout_list_mutex);
+				pthread_mutex_unlock(params->egl->focus_state
+						     .input_send_event_mutex);
 
 				json_t *json_safety_areas = json_object_get(
 					json_obj, "safety_areas");
@@ -533,11 +579,14 @@ void *layout_event_loop(void *arg)
 						       json_surfaces);
 			} else if (strcmp(command, "add_surface") == 0) {
 				add_layout_surfaces(&layout_params, json_obj,
-						    json_surfaces);
+						    json_surfaces,
+						    &params->egl->focus_state);
 			} else if (strcmp(command, "remove_surface") == 0) {
 				remove_layout_surfaces(&layout_params,
-						       json_surfaces);
+						       json_surfaces,
+						       &params->egl->focus_state);
 			} else {
+				json_decref(json_obj);
 				continue;
 			}
 
@@ -550,6 +599,11 @@ void *layout_event_loop(void *arg)
 			}
 			printf("\n");
 #endif
+
+			if (layout_params.use_layout_sync) {
+				pthread_mutex_lock(layout_params.layout_sync_mutex);
+				*(layout_params.layout_status) = LAYOUT_UPDATING;
+			}
 
 			char *json_cmd;
 			json_t *json_cmd_obj = json_object();
@@ -569,10 +623,6 @@ void *layout_event_loop(void *arg)
 			}
 
 			if (layout_params.use_layout_sync) {
-				*(layout_params.layout_status) =
-					LAYOUT_UPDATING;
-				pthread_mutex_lock(
-					layout_params.layout_sync_mutex);
 				while (*(layout_params.layout_status) !=
 				       LAYOUT_COMPLETED) {
 					pthread_cond_wait(
@@ -585,6 +635,7 @@ void *layout_event_loop(void *arg)
 			const char *completion_msg = "Layout complete";
 			write(rvgpu_layout_fd, completion_msg,
 			      strlen(completion_msg));
+			json_decref(json_obj);
 		}
 	}
 	close(server_rvgpu_layout_sock);

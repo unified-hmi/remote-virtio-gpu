@@ -25,6 +25,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -1110,7 +1111,7 @@ int gpu_device_drain_once(struct gpu_device *g)
 
 struct detach_drain_ctx {
 	struct gpu_device *g;
-	volatile bool stop;
+	atomic_bool stop;
 };
 
 /*
@@ -1124,7 +1125,7 @@ static void *detach_drain_thread(void *arg)
 {
 	struct detach_drain_ctx *c = arg;
 
-	while (!c->stop) {
+	while (!atomic_load_explicit(&c->stop, memory_order_acquire)) {
 		gpu_device_drain_once(c->g);
 		usleep(1000);
 	}
@@ -1155,7 +1156,7 @@ void gpu_device_free(struct gpu_device *g)
 	{
 		struct detach_drain_ctx ctx = { .g = g, .stop = false };
 		pthread_t drain_tid;
-		bool drainer;
+		int drainer_error;
 
 		/*
 		 * The kernel frees each vbuf from a workqueue once it sees our
@@ -1168,14 +1169,16 @@ void gpu_device_free(struct gpu_device *g)
 			usleep(10000);
 		}
 
-		drainer = pthread_create(&drain_tid, NULL,
-					 detach_drain_thread, &ctx) == 0;
+		drainer_error = pthread_create(&drain_tid, NULL,
+					      detach_drain_thread, &ctx);
+		if (drainer_error != 0) {
+			warnx("cannot start virtqueue drainer: %s; device left attached",
+			      strerror(drainer_error));
+		} else {
+			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
+				warn("cannot remove virtio-lo device");
 
-		if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
-			warn("cannot remove virtio-lo device");
-
-		if (drainer) {
-			ctx.stop = true;
+			atomic_store_explicit(&ctx.stop, true, memory_order_release);
 			pthread_join(drain_tid, NULL);
 		}
 	}
