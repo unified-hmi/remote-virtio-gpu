@@ -19,6 +19,7 @@
 #define RVGPU_JSON_HELPERS_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <jansson.h>
 

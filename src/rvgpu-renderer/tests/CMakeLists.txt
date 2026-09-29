@@ -17,3 +17,15 @@
 
 add_subdirectory(rvgpu-wm)
 add_subdirectory(rvgpu-distrib-com)
+
+add_executable(rvgpu-json-helpers-test
+	rvgpu-json-helpers-test.c
+	../compositor/rvgpu-json-helpers.c
+	$<TARGET_OBJECTS:rvgpu-utils>)
+target_include_directories(rvgpu-json-helpers-test
+	PRIVATE
+		${PROJECT_SOURCE_DIR}/include
+		${extlibs_INCLUDE_DIRS}
+	)
+target_link_libraries(rvgpu-json-helpers-test
+	PRIVATE ${extlibs_LIBRARIES} jansson)
