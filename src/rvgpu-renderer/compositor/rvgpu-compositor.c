@@ -276,8 +276,12 @@ get_focus_rvgpu_json_obj(double x, double y,
 	return getRvgpuFocus(x, y, draw_list_params);
 }
 
+static void clear_layout_focus_for_id(struct rvgpu_focus_state *focus_state,
+					      int layout_id);
+
 static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
-				   json_t *json_surfaces)
+				   json_t *json_surfaces,
+				   struct rvgpu_focus_state *focus_state)
 {
 	static const char *properties[] = {
 		"src_x", "src_y", "src_w",  "src_h",	"dst_x",
@@ -286,6 +290,7 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 	size_t index, layout_index;
 	json_t *value, *layout_value;
 
+	pthread_mutex_lock(focus_state->input_send_event_mutex);
 	pthread_mutex_lock(layout_params->layout_list_mutex);
 	json_array_foreach(json_surfaces, index, value)
 	{
@@ -316,14 +321,25 @@ static void modify_layout_surfaces(struct rvgpu_layout_params *layout_params,
 			     property_index++) {
 				json_t *property = json_object_get(
 					value, properties[property_index]);
-				if (property)
+				if (property) {
+					int visibility;
+
+					if (strcmp(properties[property_index],
+						   "visibility") == 0 &&
+					    get_int_from_jsonobj(value, "visibility",
+							 &visibility) == 0 &&
+					    visibility == 0)
+						clear_layout_focus_for_id(focus_state,
+								  layout_id);
 					json_object_set(layout_value,
 							properties[property_index], property);
+				}
 			}
 			break;
 		}
 	}
 	pthread_mutex_unlock(layout_params->layout_list_mutex);
+	pthread_mutex_unlock(focus_state->input_send_event_mutex);
 }
 
 static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
@@ -337,21 +353,25 @@ static void clear_layout_focus(struct rvgpu_focus_state *focus_state)
 static void clear_layout_focus_for_id(struct rvgpu_focus_state *focus_state,
 					      int layout_id)
 {
-	json_t *focuses[] = {
-		focus_state->touch_focused_json_obj,
-		focus_state->pointer_focused_json_obj,
-		focus_state->keyboard_focused_json_obj,
-	};
+	int focused_id;
 
-	for (size_t index = 0; index < sizeof(focuses) / sizeof(focuses[0]);
-	     index++) {
-		int focused_id;
-
-		if (focuses[index] != NULL &&
-		    get_int_from_jsonobj(focuses[index], "id", &focused_id) == 0 &&
-		    focused_id == layout_id)
-			clear_layout_focus(focus_state);
+	if (focus_state->touch_focused_json_obj != NULL &&
+	    get_int_from_jsonobj(focus_state->touch_focused_json_obj, "id",
+				  &focused_id) == 0 &&
+	    focused_id == layout_id) {
+		focus_state->touch_focused_json_obj = NULL;
+		focus_state->touch_down_count = 0;
 	}
+	if (focus_state->pointer_focused_json_obj != NULL &&
+	    get_int_from_jsonobj(focus_state->pointer_focused_json_obj, "id",
+				  &focused_id) == 0 &&
+	    focused_id == layout_id)
+		focus_state->pointer_focused_json_obj = NULL;
+	if (focus_state->keyboard_focused_json_obj != NULL &&
+	    get_int_from_jsonobj(focus_state->keyboard_focused_json_obj, "id",
+				  &focused_id) == 0 &&
+	    focused_id == layout_id)
+		focus_state->keyboard_focused_json_obj = NULL;
 }
 
 static void add_layout_surfaces(struct rvgpu_layout_params *layout_params,
@@ -576,7 +596,8 @@ void *layout_event_loop(void *arg)
 
 			} else if (strcmp(command, "modify_surface") == 0) {
 				modify_layout_surfaces(&layout_params,
-						       json_surfaces);
+						       json_surfaces,
+						       &params->egl->focus_state);
 			} else if (strcmp(command, "add_surface") == 0) {
 				add_layout_surfaces(&layout_params, json_obj,
 						    json_surfaces,

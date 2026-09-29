@@ -1171,16 +1171,20 @@ void gpu_device_free(struct gpu_device *g)
 
 		drainer_error = pthread_create(&drain_tid, NULL,
 					      detach_drain_thread, &ctx);
-		if (drainer_error != 0) {
-			warnx("cannot start virtqueue drainer: %s; device left attached",
+		while (drainer_error != 0) {
+			warnx("cannot start virtqueue drainer: %s; retrying",
 			      strerror(drainer_error));
-		} else {
-			if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
-				warn("cannot remove virtio-lo device");
-
-			atomic_store_explicit(&ctx.stop, true, memory_order_release);
-			pthread_join(drain_tid, NULL);
+			gpu_device_drain_once(g);
+			usleep(10000);
+			drainer_error = pthread_create(&drain_tid, NULL,
+						      detach_drain_thread, &ctx);
 		}
+
+		if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
+			warn("cannot remove virtio-lo device");
+
+		atomic_store_explicit(&ctx.stop, true, memory_order_release);
+		pthread_join(drain_tid, NULL);
 	}
 
 	for (i = 0u; i < 2u; i++) {

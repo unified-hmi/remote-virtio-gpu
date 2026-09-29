@@ -158,7 +158,7 @@ static int wait_for_processes(pid_t *pids, int count, int timeout_ms)
  * @brief Answer the virtqueue while DRI clients go away
  * @param dev - gpu device whose queues are drained
  * @param pids - processes that were signalled, may be NULL
- * @param count - number of entries in pids
+ * @param count - number of entries in pids, updated after a node rescan
  * @param node - stat of the DRM node to rescan for holders, may be NULL
  * @param max_wait_ms - upper bound on the whole wait
  *
@@ -170,7 +170,7 @@ static int wait_for_processes(pid_t *pids, int count, int timeout_ms)
  * because the drain that wakes their ioctl is what lets the signal land.
  */
 static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
-				     int count, const struct stat *node,
+				     int *count, const struct stat *node,
 				     int max_wait_ms)
 {
 	const int interval_ms = 10;
@@ -185,6 +185,9 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 	int loops_since_scan = node_scan_interval;
 	bool node_users_present = false;
 	bool sigkill_sent = false;
+	pid_t discovered_pids[64];
+	pid_t *tracked_pids = pids ? pids : discovered_pids;
+	int tracked_count = count ? *count : 0;
 
 	while (elapsed_ms < max_wait_ms) {
 		int flushed = gpu_device_drain_once(dev);
@@ -192,8 +195,9 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 
 		total_drained += flushed;
 
-		for (int i = 0; i < count; i++) {
-			if (pids[i] > 0 && process_exists(pids[i])) {
+		for (int i = 0; i < tracked_count; i++) {
+			if (tracked_pids[i] > 0 &&
+			    process_exists(tracked_pids[i])) {
 				any_alive = true;
 				break;
 			}
@@ -206,27 +210,30 @@ static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
 		 */
 		if (!any_alive && node != NULL) {
 			if (++loops_since_scan >= node_scan_interval) {
-				pid_t others[64];
-
 				loops_since_scan = 0;
-				node_users_present =
-					find_dri_user_pids(node, getpid(), others,
-							   64) > 0;
+				tracked_count = find_dri_user_pids(
+					node, getpid(), tracked_pids, 64);
+				if (count != NULL)
+					*count = tracked_count;
+				node_users_present = tracked_count > 0;
+				if (node_users_present)
+					sigkill_sent = false;
 			}
 			if (node_users_present)
 				any_alive = true;
 		}
 
-		if (!sigkill_sent && count > 0 && any_alive &&
+		if (!sigkill_sent && tracked_count > 0 && any_alive &&
 		    (idle_ms >= idle_before_kill_ms ||
 		     elapsed_ms >= kill_deadline_ms)) {
 			warnx("Escalating to SIGKILL (elapsed=%dms idle=%dms)",
 			      elapsed_ms, idle_ms);
-			for (int i = 0; i < count; i++) {
-				if (pids[i] > 0 && process_exists(pids[i])) {
+			for (int i = 0; i < tracked_count; i++) {
+				if (tracked_pids[i] > 0 &&
+				    process_exists(tracked_pids[i])) {
 					warnx("  Sending SIGKILL to PID %d",
-					      pids[i]);
-					kill(pids[i], SIGKILL);
+					      tracked_pids[i]);
+					kill(tracked_pids[i], SIGKILL);
 				}
 			}
 			sigkill_sent = true;
@@ -328,7 +335,7 @@ static void terminate_dri_users(struct gpu_device *dev, uint32_t vendor_id)
 		 * Nothing to signal, but the removal that follows still blocks
 		 * on clients we failed to identify, so keep answering them.
 		 */
-		drain_during_dri_cleanup(dev, NULL, 0, NULL, dri_grace_ms);
+		drain_during_dri_cleanup(dev, NULL, NULL, NULL, dri_grace_ms);
 		return;
 	}
 
@@ -346,7 +353,7 @@ static void terminate_dri_users(struct gpu_device *dev, uint32_t vendor_id)
 	 * already shutting down closes the device once it wakes, so only what
 	 * still holds it after this is signalled.
 	 */
-	drain_during_dri_cleanup(dev, NULL, 0, &target_stat, dri_grace_ms);
+	drain_during_dri_cleanup(dev, NULL, NULL, &target_stat, dri_grace_ms);
 
 	/* Find processes using the device */
 	count = find_dri_user_pids(&target_stat, my_pid, pids, 64);
@@ -369,7 +376,8 @@ static void terminate_dri_users(struct gpu_device *dev, uint32_t vendor_id)
 	 * ioctls they are sleeping in and absorbs the requests their DRM
 	 * cleanup generates; SIGKILL is escalated from inside the drain.
 	 */
-	drain_during_dri_cleanup(dev, pids, count, &target_stat, dri_cleanup_ms);
+	drain_during_dri_cleanup(dev, pids, &count, &target_stat,
+				       dri_cleanup_ms);
 
 	remaining = wait_for_processes(pids, count, 0);
 	if (remaining > 0)
