@@ -114,6 +114,17 @@ void gpu_device_free(struct gpu_device *g);
 void gpu_device_flush_pending(struct gpu_device *g);
 
 /**
+ * @brief Answer every request currently pending on the virtqueues
+ * @param g - pointer to gpu device structure
+ * @return number of requests answered
+ *
+ * Unlike gpu_device_flush_pending() this does not wait for the queue to settle,
+ * so it can be called repeatedly while another thread is blocked in a call that
+ * only completes once the clients have been released.
+ */
+int gpu_device_drain_once(struct gpu_device *g);
+
+/**
  * @brief Get the vendor_id of the gpu device
  * @param g - pointer to gpu device structure
  * @return vendor_id used for the virtio-lo device

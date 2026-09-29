@@ -1049,6 +1049,88 @@ void gpu_device_flush_pending(struct gpu_device *g)
 	}
 }
 
+int gpu_device_drain_once(struct gpu_device *g)
+{
+	unsigned int i;
+	int flushed = 0;
+	int kick_ctrl = 0, kick_cursor = 0;
+	struct async_resp *r = g->async_resp;
+	struct cmd *cmd;
+
+	while ((cmd = TAILQ_FIRST(&r->async_cmds)) != NULL) {
+		struct virtio_gpu_ctrl_hdr resp = {
+			.type = VIRTIO_GPU_RESP_OK_NODATA,
+			.flags = cmd->hdr.flags,
+			.fence_id = cmd->hdr.fence_id,
+			.ctx_id = cmd->hdr.ctx_id,
+		};
+
+		vqueue_send_response(cmd->req, &resp, sizeof(resp));
+		TAILQ_REMOVE(&r->async_cmds, cmd, cmds);
+		free(cmd);
+		kick_ctrl++;
+		flushed++;
+	}
+
+	for (i = 0u; i < 2u; i++) {
+		struct vqueue *q = &g->vq[i];
+
+		while (vqueue_are_requests_available(q)) {
+			struct vqueue_request *req;
+			struct virtio_gpu_ctrl_hdr resp = {
+				.type = VIRTIO_GPU_RESP_OK_NODATA,
+			};
+
+			req = vqueue_get_request(g->lo_fd, q);
+			if (!req)
+				break;
+
+			vqueue_send_response(req, &resp, sizeof(resp));
+			flushed++;
+			if (i == 0u)
+				kick_ctrl++;
+			else
+				kick_cursor++;
+		}
+	}
+
+	if (kick_ctrl) {
+		struct virtio_lo_kick k = { .idx = g->idx, .qidx = 0 };
+
+		ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+	}
+	if (kick_cursor) {
+		struct virtio_lo_kick k = { .idx = g->idx, .qidx = 1 };
+
+		ioctl(g->lo_fd, VIRTIO_LO_KICK, &k);
+	}
+
+	return flushed;
+}
+
+struct detach_drain_ctx {
+	struct gpu_device *g;
+	volatile bool stop;
+};
+
+/*
+ * Device removal does not return until drm_dev_unplug() has released every
+ * client still inside a virtio-gpu ioctl, and those clients only get out once
+ * their command is answered. The calling thread is parked in that ioctl, so
+ * somebody else has to keep serving the queue or the two sides wait on each
+ * other forever.
+ */
+static void *detach_drain_thread(void *arg)
+{
+	struct detach_drain_ctx *c = arg;
+
+	while (!c->stop) {
+		gpu_device_drain_once(c->g);
+		usleep(1000);
+	}
+	return NULL;
+}
+
 void gpu_device_free(struct gpu_device *g)
 {
 	unsigned int i;
@@ -1061,6 +1143,41 @@ void gpu_device_free(struct gpu_device *g)
 	if (g->resource_thread) {
 		g->resource_thread_shutdown = true;
 		pthread_join(g->resource_thread, NULL);
+		g->resource_thread = 0;
+	}
+
+	/*
+	 * Remove the device explicitly rather than leaving it to close(lo_fd):
+	 * only an explicit call can be wrapped in a drain that keeps the
+	 * clients moving while the removal blocks. The vrings stay mapped
+	 * until it returns, so the helper thread can drain for the whole call.
+	 */
+	{
+		struct detach_drain_ctx ctx = { .g = g, .stop = false };
+		pthread_t drain_tid;
+		bool drainer;
+
+		/*
+		 * The kernel frees each vbuf from a workqueue once it sees our
+		 * response, so answering a request is not the same as the
+		 * request being finished. Let that work run before the device
+		 * goes away, otherwise the leftovers leak the vbuf cache.
+		 */
+		for (int n = 0; n < 20; n++) {
+			gpu_device_drain_once(g);
+			usleep(10000);
+		}
+
+		drainer = pthread_create(&drain_tid, NULL,
+					 detach_drain_thread, &ctx) == 0;
+
+		if (ioctl(g->lo_fd, VIRTIO_LO_DELDEV, g->idx) != 0)
+			warn("cannot remove virtio-lo device");
+
+		if (drainer) {
+			ctx.stop = true;
+			pthread_join(drain_tid, NULL);
+		}
 	}
 
 	for (i = 0u; i < 2u; i++) {
