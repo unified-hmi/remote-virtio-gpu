@@ -1061,8 +1061,14 @@ int gpu_device_drain_once(struct gpu_device *g)
 	int kick_ctrl = 0, kick_cursor = 0;
 	struct async_resp *r = g->async_resp;
 	struct cmd *cmd;
+	struct cmd *pending_cmd;
+	unsigned int async_count = 0;
 
-	while ((cmd = TAILQ_FIRST(&r->async_cmds)) != NULL) {
+	TAILQ_FOREACH (pending_cmd, &r->async_cmds, cmds)
+		async_count++;
+
+	while (async_count-- > 0 &&
+	       (cmd = TAILQ_FIRST(&r->async_cmds)) != NULL) {
 		struct virtio_gpu_ctrl_hdr resp = {
 			.type = VIRTIO_GPU_RESP_OK_NODATA,
 			.flags = cmd->hdr.flags,
@@ -1079,8 +1085,9 @@ int gpu_device_drain_once(struct gpu_device *g)
 
 	for (i = 0u; i < 2u; i++) {
 		struct vqueue *q = &g->vq[i];
+		uint16_t drain_until = q->vr.avail->idx;
 
-		while (vqueue_are_requests_available(q)) {
+		while (q->last_avail_idx != drain_until) {
 			struct vqueue_request *req;
 			struct virtio_gpu_ctrl_hdr resp = {
 				.type = VIRTIO_GPU_RESP_OK_NODATA,
@@ -1090,6 +1097,15 @@ int gpu_device_drain_once(struct gpu_device *g)
 			if (!req)
 				break;
 
+			if (iov_size(req->r, req->nr) >= sizeof(resp)) {
+				struct virtio_gpu_ctrl_hdr request_hdr;
+
+				copy_from_iov(req->r, req->nr, &request_hdr,
+					      sizeof(request_hdr));
+				resp.flags = request_hdr.flags;
+				resp.fence_id = request_hdr.fence_id;
+				resp.ctx_id = request_hdr.ctx_id;
+			}
 			vqueue_send_response(req, &resp, sizeof(resp));
 			flushed++;
 			if (i == 0u)
