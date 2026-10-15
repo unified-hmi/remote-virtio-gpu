@@ -478,6 +478,7 @@ void *layout_event_loop(void *arg)
 			if (!json_is_string(json_command)) {
 				fprintf(stderr,
 					"no command request or command property mismatch\n");
+				json_decref(json_obj);
 				continue;
 			}
 			json_t *json_surfaces =
@@ -485,6 +486,7 @@ void *layout_event_loop(void *arg)
 			if (!json_is_array(json_surfaces)) {
 				fprintf(stderr,
 					"no surfaces request or surfaces property mismatch\n");
+				json_decref(json_obj);
 				continue;
 			}
 			const char *command = json_string_value(json_command);
@@ -499,7 +501,7 @@ void *layout_event_loop(void *arg)
 						   rvgpu_sfc_index,
 						   rvgpu_sfc_value)
 				{
-					json_array_append(
+					json_array_append_new(
 						layout_params.rvgpu_layout_list,
 						json_deep_copy(
 							rvgpu_sfc_value));
@@ -519,7 +521,7 @@ void *layout_event_loop(void *arg)
 					json_array_foreach(json_safety_areas,
 							   index, value)
 					{
-						json_array_append(
+						json_array_append_new(
 							layout_params
 								.rvgpu_safety_areas,
 							json_deep_copy(value));
@@ -538,6 +540,7 @@ void *layout_event_loop(void *arg)
 				remove_layout_surfaces(&layout_params,
 						       json_surfaces);
 			} else {
+				json_decref(json_obj);
 				continue;
 			}
 
@@ -585,6 +588,7 @@ void *layout_event_loop(void *arg)
 			const char *completion_msg = "Layout complete";
 			write(rvgpu_layout_fd, completion_msg,
 			      strlen(completion_msg));
+			json_decref(json_obj);
 		}
 	}
 	close(server_rvgpu_layout_sock);
@@ -899,11 +903,14 @@ end:
 							json_integer(shared_buffer_type));
 					char *return_cmd_json_str = json_dumps(return_cmd_json_obj, JSON_ENCODE_ANY);
 					send_str_with_size(client_rvgpu_control_fd, return_cmd_json_str);
+					free(return_cmd_json_str);
 					json_decref(return_cmd_json_obj);
 					send_buffer_handle(client_rvgpu_control_fd,
 							shared_buffer_handle,
 							&pf_funcs);
 					// printf("RVGPU_CREATE_BUFFER_EVENT_ID updated json_composit_obj: %s\n", json_dumps(json_composit_obj, 0));
+					json_decref(json_cmd_obj);
+					json_decref(json_obj);
 					continue;
 				} else if (event_id == RVGPU_DRAW_EVENT_ID) {
 					if (get_int_from_jsonobj(
@@ -1554,6 +1561,7 @@ void compositor_render(struct compositor_params *params,
 					if (get_int_from_jsonobj(
 						    json_cmd_obj, "event_id",
 						    &event_id) == -1) {
+						json_decref(json_cmd_obj);
 						continue;
 					}
 					event_num++;
@@ -1575,6 +1583,7 @@ void compositor_render(struct compositor_params *params,
 
 						pthread_mutex_unlock(
 							&surface_list_mutex);
+						json_decref(json_cmd_obj);
 						continue;
 
 					} else if (event_id ==
@@ -1651,16 +1660,16 @@ void compositor_render(struct compositor_params *params,
 							if (strcmp(ext_rvgpu_surface_id,
 								   rvgpu_surface_id) == 0 &&
 							    ext_scanout_id == scanout_id) {
-								json_object_set(
+								json_object_set_new(
 									value, "composit_tex_id",
 									json_integer(composit_tex_id));
-								json_object_set(
+								json_object_set_new(
 									value, "width",
 									json_integer(img_w));
-								json_object_set(
+								json_object_set_new(
 									value, "height",
 									json_integer(img_h));
-								json_object_set(
+								json_object_set_new(
 									value, "initial_color",
 									json_integer(
 										initial_color));
@@ -1690,12 +1699,14 @@ void compositor_render(struct compositor_params *params,
 							rvgpu_surface_id);
 						pthread_mutex_unlock(
 							&surface_list_mutex);
+						json_decref(json_cmd_obj);
 						continue;
 
 					} else if (event_id ==
 						   RVGPU_LAYOUT_EVENT_ID) {
 						layout_event = true;
 						layout_event_num++;
+						json_decref(json_cmd_obj);
 						continue;
 
 					} else if (event_id ==
@@ -1704,8 +1715,10 @@ void compositor_render(struct compositor_params *params,
 						uint64_t u = 1;
 						write(event_fd, &u,
 						      sizeof(uint64_t));
+						json_decref(json_cmd_obj);
 						break;
 					}
+					json_decref(json_cmd_obj);
 				}
 
 			} else {
@@ -2181,6 +2194,7 @@ static void *rvgpu_input_event_loop(void *arg)
 			int event_id;
 			if (get_int_from_jsonobj(json_obj, "event_id",
 						 &event_id) == -1) {
+				json_decref(json_obj);
 				continue;
 			}
 			double x, y;
@@ -2316,6 +2330,7 @@ static void *rvgpu_input_event_loop(void *arg)
 			printf("rvgpu_input_event_loop json_str: %s\n", json_str);
 			free(json_str);
 #endif
+			json_decref(json_obj);
 		}
 	}
 	fclose(input_stream);
@@ -2375,6 +2390,7 @@ void *swap_completed_loop(void *arg)
 			if (get_int_from_jsonobj(swap_completed_cmd,
 						 "scanout_id",
 						 &scanout_id) == -1) {
+				json_decref(swap_completed_cmd);
 				continue;
 			}
 			json_t *json_updated_index_array = json_object_get(
@@ -2404,6 +2420,7 @@ void *swap_completed_loop(void *arg)
 #if 0
 		    printf("swap_completed_loop swap_completed_cmd: rvgpu_surface_id: %s, scanout_id: %d, %s\n", rvgpu_surface_id, scanout_id, json_dumps(json_updated_index_array, 0));
 #endif
+			json_decref(swap_completed_cmd);
 		}
 	}
 	return NULL;

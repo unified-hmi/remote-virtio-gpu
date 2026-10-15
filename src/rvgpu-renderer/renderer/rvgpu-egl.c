@@ -490,6 +490,7 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 					json_integer(s->buf_state->shared_buffer_fd_index));
 			char *create_buf_cmd_json_str = json_dumps(create_buf_cmd_json_obj, JSON_ENCODE_ANY);
 			send_str_with_size(e->server_rvgpu_control_fd, create_buf_cmd_json_str);
+			free(create_buf_cmd_json_str);
 			json_decref(create_buf_cmd_json_obj);
 			int buffer_type;
 			json_t *return_json_obj = recv_json(e->server_rvgpu_control_fd);
@@ -530,6 +531,7 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 					    [s->buf_state->shared_buffer_fd_index] ==
 				    NULL) {
 					printf("child render cannot get shared buffer fds\n");
+					json_decref(return_json_obj);
 					return;
 				}
 				shared_buffer_type[s->buf_state->shared_buffer_fd_index] = buffer_type;
@@ -568,6 +570,7 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 								 ->shared_buffer_fd_index],
 						0);
 				}
+				json_decref(return_json_obj);
 			}
 		}
 
@@ -676,6 +679,7 @@ void rvgpu_egl_draw(struct rvgpu_egl_state *e, struct rvgpu_scanout *s,
 			1;
 		pthread_mutex_unlock(s->buf_state->swap_sync_mutex);
 		send_str_with_size(e->server_rvgpu_control_fd, json_str);
+		free(json_str);
 		if (s->fps_params.show_fps) {
 			draw_swap_time_ms =
 				current_get_time_ms() - swap_laptime;
