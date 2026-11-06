@@ -650,8 +650,8 @@ void rvgpu_wl_create_window(struct rvgpu_egl_state *e, uint32_t width,
 				struct wl_region *region =
 					wl_compositor_create_region(r->comp);
 				assert(region);
-				wl_region_add(region, 0, 0, *(r->width),
-					      *(r->height));
+				wl_region_add(region, 0, 0, INT32_MAX,
+					      INT32_MAX);
 				wl_surface_set_opaque_region(native->surface,
 							     region);
 				wl_region_destroy(region);
@@ -683,7 +683,8 @@ void rvgpu_wl_create_window(struct rvgpu_egl_state *e, uint32_t width,
 				struct wl_region *region =
 					wl_compositor_create_region(r->comp);
 				assert(region);
-				wl_region_add(region, 0, 0, width, height);
+				wl_region_add(region, 0, 0, INT32_MAX,
+					      INT32_MAX);
 				wl_surface_set_opaque_region(native->surface,
 							     region);
 				wl_region_destroy(region);

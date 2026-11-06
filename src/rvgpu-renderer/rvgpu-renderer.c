@@ -50,6 +50,7 @@ static void usage(void)
 	info("Usage: %s [options]\n", program_name);
 	info("\t-B color\tcolor of initial screen in RGBA format");
 	info("(0xRRGGBBAA, default is 0x%08x)\n", BACKEND_COLOR);
+	info("\t\t\talpha below 0xFF enables translucent mode on Wayland\n");
 	info("\t-c capset\tdump capset into file\n");
 	info("\t-b box\t\toverride scanout box (format WxH@X,Y)\n");
 	info("\t-i ID\t\tset scanout window ID (for IVI shell)\n");
@@ -301,6 +302,7 @@ int main(int argc, char **argv)
 	int w, h, x, y, opt = 0;
 	uint16_t port_no = RVGPU_DEFAULT_PORT;
 	bool fullscreen = false, vsync = false, translucent = false;
+	bool clear_color_set = false;
 
 	uint32_t width = 800;
 	uint32_t height = 600;
@@ -325,6 +327,7 @@ int main(int argc, char **argv)
 				     "Invalid background color specified %s:%s",
 				     optarg, errstr);
 			}
+			clear_color_set = true;
 			break;
 
 		case 'c':
@@ -446,6 +449,12 @@ int main(int argc, char **argv)
 	rvgpu_wl_params *wl_params = NULL;
 	rvgpu_gbm_params *gbm_params = NULL;
 	if (carddev == NULL) {
+		/*
+		 * Only an explicit -B is honored: the default background
+		 * has alpha 0 but has always been shown as opaque.
+		 */
+		if (clear_color_set && (egl_params.clear_color & 0xFF) < 0xFF)
+			translucent = true;
 		rvgpu_wl_params *wl_params =
 			(rvgpu_wl_params *)calloc(1, sizeof(rvgpu_wl_params));
 		wl_params->fullscreen = fullscreen;

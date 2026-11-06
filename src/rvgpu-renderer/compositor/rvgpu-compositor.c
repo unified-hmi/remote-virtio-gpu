@@ -1520,10 +1520,14 @@ void compositor_render(struct compositor_params *params,
 	init_2d_renderer(width, height);
 	eglSwapInterval(main_egl->dpy, 1);
 	if (!layout_params.use_rvgpu_layout_draw) {
-		glClearColor(((egl_params.clear_color >> 24) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 16) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 8) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 0) & 0xFF) / 255.0f);
+		float alpha = (egl_params.clear_color & 0xFF) / 255.0f;
+		/* Wayland compositors expect premultiplied alpha */
+		float rgb_scale = (params->carddev == NULL &&
+				   params->translucent) ? alpha : 1.0f;
+		glClearColor(((egl_params.clear_color >> 24) & 0xFF) / 255.0f * rgb_scale,
+			     ((egl_params.clear_color >> 16) & 0xFF) / 255.0f * rgb_scale,
+			     ((egl_params.clear_color >> 8) & 0xFF) / 255.0f * rgb_scale,
+			     alpha);
 		glClear(GL_COLOR_BUFFER_BIT);
 		rvgpu_pf_swap(main_egl, vsync, &pf_funcs);
 	}
