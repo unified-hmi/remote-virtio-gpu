@@ -1842,6 +1842,14 @@ void compositor_render(struct compositor_params *params,
 		struct timespec start;
 		clock_gettime(CLOCK_MONOTONIC, &start);
 
+		/*
+		 * rvgpu_surface_list and its members are concurrently
+		 * modified by the registration thread (json_array_append/
+		 * remove). Hold surface_list_mutex across this iteration,
+		 * which dumps, removes and decrefs JSON nodes, to avoid a
+		 * jansson heap corruption/abort in json_delete().
+		 */
+		pthread_mutex_lock(&surface_list_mutex);
 		json_array_foreach(rvgpu_surface_list, index, value)
 		{
 			json_t *json_updated_index_array =
@@ -1897,6 +1905,7 @@ void compositor_render(struct compositor_params *params,
 				}
 			}
 		}
+		pthread_mutex_unlock(&surface_list_mutex);
 
 		//draw all surfaces using texture
 		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -2248,6 +2257,14 @@ void compositor_render(struct compositor_params *params,
 			pthread_mutex_unlock(&layout_sync_mutex);
 		}
 
+		/*
+		 * rvgpu_surface_list and its members are concurrently
+		 * modified by the registration thread (json_array_append/
+		 * remove). Hold surface_list_mutex across the whole
+		 * iteration + json_dumps to avoid a jansson realloc heap
+		 * corruption ("free(): chunks in smallbin corrupted").
+		 */
+		pthread_mutex_lock(&surface_list_mutex);
 		json_array_foreach(rvgpu_surface_list, index, value)
 		{
 			json_t *json_updated_index_array =
@@ -2274,6 +2291,7 @@ void compositor_render(struct compositor_params *params,
 				}
 			}
 		}
+		pthread_mutex_unlock(&surface_list_mutex);
 #if 0
 		static uint32_t swap_cnt;
 		static double total_time;

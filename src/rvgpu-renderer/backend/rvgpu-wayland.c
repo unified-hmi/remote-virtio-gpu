@@ -802,8 +802,21 @@ void *rvgpu_wl_init(void *params, uint32_t *width, uint32_t *height)
 
 	rvgpu_egl_init_context(&r->egl);
 
+	/*
+	 * Create the window and complete the initial xdg configure
+	 * handshake (wl_display_roundtrip) BEFORE starting the event_loop
+	 * thread. event_loop uses wl_display_prepare_read/read_events while
+	 * rvgpu_wl_create_window uses wl_display_roundtrip; libwayland does
+	 * not allow mixing these two dispatch styles concurrently on the
+	 * same wl_display from different threads. Doing so races on the
+	 * configure event and intermittently leaves the surface unmapped
+	 * (no first buffer commit -> no window). Running create_window
+	 * single-threaded first guarantees the window is configured and
+	 * mapped, then the concurrent event loop can safely take over.
+	 */
+	rvgpu_wl_create_window(&r->egl, *width, *height, ivi_surface_id);
+
 	pthread_create(&wl_event_thread, NULL, event_loop, r);
 
-	rvgpu_wl_create_window(&r->egl, *width, *height, ivi_surface_id);
 	return &r->egl;
 }
