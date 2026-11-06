@@ -131,4 +131,12 @@ int gpu_device_drain_once(struct gpu_device *g);
  */
 uint32_t gpu_device_get_vendor_id(struct gpu_device *g);
 
+/**
+ * @brief Extract vendor_id hex suffix from a DEVPATH string
+ * @param devpath - udev DEVPATH property value
+ * @param out_value - output: extracted vendor_id value
+ * @return 0 on success, -1 on failure
+ */
+int get_virtio_suffix_hex(const char *devpath, unsigned int *out_value);
+
 #endif /* RVGPU_GPU_DEVICE_H */
