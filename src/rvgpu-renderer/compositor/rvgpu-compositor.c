@@ -1475,6 +1475,11 @@ void compositor_render(struct compositor_params *params,
 	struct rvgpu_egl_state *main_egl =
 		(struct rvgpu_egl_state *)rvgpu_egl_pf_init(
 			egl_pf_init_params, &width, &height, &pf_funcs);
+	if (!main_egl) {
+		fprintf(stderr, "Failed to initialize EGL backend\n");
+		close(event_fd);
+		return;
+	}
 
 	// Mutex Init
 	pthread_mutex_t surface_list_mutex, input_send_event_mutex,

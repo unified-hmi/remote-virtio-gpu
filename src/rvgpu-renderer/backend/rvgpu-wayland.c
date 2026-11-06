@@ -778,15 +778,29 @@ void *rvgpu_wl_init(void *params, uint32_t *width, uint32_t *height)
 
 	/* Wayland initialization */
 	r->dpy = create_wl_native_display(NULL);
-	assert(r->dpy);
+	if (!r->dpy) {
+		free(r);
+		return NULL;
+	}
 
+	/* assert() is compiled out in release builds, so check explicitly */
 	r->reg = wl_display_get_registry(r->dpy);
-	assert(r->reg);
+	if (!r->reg) {
+		fprintf(stderr, "Failed to get Wayland registry\n");
+		wl_display_disconnect(r->dpy);
+		free(r);
+		return NULL;
+	}
 
 	wl_registry_add_listener(r->reg, &registry_listener, r);
 	res = wl_display_roundtrip(r->dpy);
-	assert(res != -1);
-	(void)res;
+	if (res == -1) {
+		fprintf(stderr, "Failed to get Wayland globals\n");
+		wl_registry_destroy(r->reg);
+		wl_display_disconnect(r->dpy);
+		free(r);
+		return NULL;
+	}
 
 	/* EGL initialization */
 	if (rvgpu_get_platform_display) {
