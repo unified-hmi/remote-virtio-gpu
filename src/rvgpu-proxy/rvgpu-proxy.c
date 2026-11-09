@@ -303,7 +303,7 @@ static int terminate_dri_users(int card_num, pid_t *out_pids, int max_pids)
 	pid_t my_pid = getpid();
 	pid_t pids[64];
 	int count, remaining, out_count;
-	const int sigterm_timeout_ms = 2000;
+	const int sigterm_timeout_ms = 5000;
 
 	if (card_num < 0) {
 		warnx("DRM card number unknown, skipping DRI cleanup");
@@ -779,6 +779,27 @@ int main(int argc, char **argv)
 	}
 
 	warnx("Shutdown requested, cleaning up...");
+
+	/*
+	 * Brief drain before killing DRI users.
+	 * Apps may be stuck in kernel virtio-gpu ioctls (D state)
+	 * waiting for virtqueue responses.  Draining a few requests
+	 * unblocks those ioctls so the apps can receive SIGTERM.
+	 */
+	{
+		int pre_drained = 0;
+
+		for (int i = 0; i < 50; i++) {
+			int n = gpu_device_drain_once(dev);
+
+			pre_drained += n;
+			if (n == 0)
+				break;
+		}
+		if (pre_drained > 0)
+			warnx("Pre-drain: flushed %d pending requests",
+			      pre_drained);
+	}
 
 	/*
 	 * Give the DRI users a chance to leave of their own accord before
