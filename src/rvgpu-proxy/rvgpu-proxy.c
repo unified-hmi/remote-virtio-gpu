@@ -31,6 +31,7 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 
 #include <librvgpu/rvgpu-plugin.h>
@@ -720,11 +721,31 @@ int main(int argc, char **argv)
 		fclose(oomFile);
 	}
 
+	/*
+	 * Serialize vendor_id assignment across proxy instances.
+	 * next_drm_card_mex() (called inside gpu_device_init) scans
+	 * existing virtual DRM cards to pick the next vendor_id.
+	 * Without a lock, simultaneous proxies all see 0 cards and
+	 * pick the same vendor_id, making find_drm_card_by_vendor()
+	 * return the same card for all of them.  Hold the lock until
+	 * wait_for_drm_card() confirms our card is visible in udev.
+	 */
+#define VENDOR_LOCK_PATH "/tmp/.rvgpu-vendor-lock"
+	int vendor_lock_fd = open(VENDOR_LOCK_PATH,
+				  O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+	if (vendor_lock_fd < 0)
+		err(1, "open %s", VENDOR_LOCK_PATH);
+	if (flock(vendor_lock_fd, LOCK_EX) < 0)
+		err(1, "flock %s", VENDOR_LOCK_PATH);
+
 	dev = gpu_device_init(lo_fd, epoll_fd, capset, &params, rvgpu_be);
 	if (!dev)
 		err(1, "gpu device init");
 
 	int drm_card_num = wait_for_drm_card(dev, epoll_fd);
+
+	flock(vendor_lock_fd, LOCK_UN);
+	close(vendor_lock_fd);
 
 	inpdev = input_device_init(rvgpu_be);
 	if (!inpdev)
