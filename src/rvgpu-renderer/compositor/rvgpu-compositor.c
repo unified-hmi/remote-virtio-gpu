@@ -1475,6 +1475,11 @@ void compositor_render(struct compositor_params *params,
 	struct rvgpu_egl_state *main_egl =
 		(struct rvgpu_egl_state *)rvgpu_egl_pf_init(
 			egl_pf_init_params, &width, &height, &pf_funcs);
+	if (!main_egl) {
+		fprintf(stderr, "Failed to initialize EGL backend\n");
+		close(event_fd);
+		return;
+	}
 
 	// Mutex Init
 	pthread_mutex_t surface_list_mutex, input_send_event_mutex,
@@ -1515,10 +1520,14 @@ void compositor_render(struct compositor_params *params,
 	init_2d_renderer(width, height);
 	eglSwapInterval(main_egl->dpy, 1);
 	if (!layout_params.use_rvgpu_layout_draw) {
-		glClearColor(((egl_params.clear_color >> 24) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 16) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 8) & 0xFF) / 255.0f,
-			     ((egl_params.clear_color >> 0) & 0xFF) / 255.0f);
+		float alpha = (egl_params.clear_color & 0xFF) / 255.0f;
+		/* Wayland compositors expect premultiplied alpha */
+		float rgb_scale = (params->carddev == NULL &&
+				   params->translucent) ? alpha : 1.0f;
+		glClearColor(((egl_params.clear_color >> 24) & 0xFF) / 255.0f * rgb_scale,
+			     ((egl_params.clear_color >> 16) & 0xFF) / 255.0f * rgb_scale,
+			     ((egl_params.clear_color >> 8) & 0xFF) / 255.0f * rgb_scale,
+			     alpha);
 		glClear(GL_COLOR_BUFFER_BIT);
 		rvgpu_pf_swap(main_egl, vsync, &pf_funcs);
 	}
@@ -1842,6 +1851,14 @@ void compositor_render(struct compositor_params *params,
 		struct timespec start;
 		clock_gettime(CLOCK_MONOTONIC, &start);
 
+		/*
+		 * rvgpu_surface_list and its members are concurrently
+		 * modified by the registration thread (json_array_append/
+		 * remove). Hold surface_list_mutex across this iteration,
+		 * which dumps, removes and decrefs JSON nodes, to avoid a
+		 * jansson heap corruption/abort in json_delete().
+		 */
+		pthread_mutex_lock(&surface_list_mutex);
 		json_array_foreach(rvgpu_surface_list, index, value)
 		{
 			json_t *json_updated_index_array =
@@ -1897,6 +1914,7 @@ void compositor_render(struct compositor_params *params,
 				}
 			}
 		}
+		pthread_mutex_unlock(&surface_list_mutex);
 
 		//draw all surfaces using texture
 		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -2248,6 +2266,14 @@ void compositor_render(struct compositor_params *params,
 			pthread_mutex_unlock(&layout_sync_mutex);
 		}
 
+		/*
+		 * rvgpu_surface_list and its members are concurrently
+		 * modified by the registration thread (json_array_append/
+		 * remove). Hold surface_list_mutex across the whole
+		 * iteration + json_dumps to avoid a jansson realloc heap
+		 * corruption ("free(): chunks in smallbin corrupted").
+		 */
+		pthread_mutex_lock(&surface_list_mutex);
 		json_array_foreach(rvgpu_surface_list, index, value)
 		{
 			json_t *json_updated_index_array =
@@ -2274,6 +2300,7 @@ void compositor_render(struct compositor_params *params,
 				}
 			}
 		}
+		pthread_mutex_unlock(&surface_list_mutex);
 #if 0
 		static uint32_t swap_cnt;
 		static double total_time;

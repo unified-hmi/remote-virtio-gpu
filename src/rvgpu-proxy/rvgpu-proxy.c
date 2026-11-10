@@ -21,16 +21,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libudev.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
 
 #include <librvgpu/rvgpu-plugin.h>
 #include <librvgpu/rvgpu-protocol.h>
@@ -52,52 +57,122 @@ static void shutdown_signal_handler(int sig)
 	g_shutdown_requested = 1;
 }
 
+/** One DRM minor of a card: its path, and the device it actually is. */
+struct drm_node {
+	char path[64];
+	dev_t rdev;
+};
+
+/** A process found holding one of those nodes. */
+struct dri_user {
+	pid_t pid;
+	int fd;			/* pidfd, or -1 where the kernel has none */
+	char cmd[128];
+};
+
+static int pidfd_open_compat(pid_t pid)
+{
+#ifdef SYS_pidfd_open
+	return (int)syscall(SYS_pidfd_open, pid, 0);
+#else
+	(void)pid;
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+static int pidfd_signal_compat(int pidfd, int sig)
+{
+#ifdef SYS_pidfd_send_signal
+	return (int)syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
+#else
+	(void)pidfd;
+	(void)sig;
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+/**
+ * @brief Read a process command line into buf, blanks between arguments
+ * @param pid - process ID to read
+ * @param buf - output buffer, empty string if the process is already gone
+ * @param len - size of buf
+ */
+static void read_proc_cmdline(pid_t pid, char *buf, size_t len)
+{
+	char path[64];
+	int fd;
+	ssize_t n;
+
+	buf[0] = '\0';
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+
+	n = read(fd, buf, len - 1);
+	close(fd);
+	if (n <= 0) {
+		buf[0] = '\0';
+		return;
+	}
+
+	buf[n] = '\0';
+	for (ssize_t i = 0; i < n - 1; i++) {
+		if (buf[i] == '\0')
+			buf[i] = ' ';
+	}
+}
+
 /**
  * @brief Find PIDs of processes using the specified device and store them
- * @param target_stat - stat of the target device
+ * @param rdev - device number of the target node
  * @param my_pid - our own pid to exclude
  * @param pids - array to store PIDs (caller must provide)
  * @param max_pids - maximum number of PIDs to store
  * @return number of processes found
  */
-static int find_dri_user_pids(const struct stat *target_stat, pid_t my_pid,
-			     pid_t *pids, int max_pids)
+static int find_dri_user_pids(dev_t rdev, pid_t my_pid,
+			      pid_t *pids, int max_pids)
 {
 	int count = 0;
 	DIR *proc_dir = opendir("/proc");
-
 	if (!proc_dir)
 		return 0;
 
 	struct dirent *proc_entry;
-
 	while ((proc_entry = readdir(proc_dir)) != NULL && count < max_pids) {
 		pid_t pid = (pid_t)atoi(proc_entry->d_name);
-
 		if (pid <= 0 || pid == my_pid)
 			continue;
 
 		char fd_dir_path[64];
-
-		snprintf(fd_dir_path, sizeof(fd_dir_path), "/proc/%d/fd",
-			 pid);
+		snprintf(fd_dir_path, sizeof(fd_dir_path), "/proc/%d/fd", pid);
 
 		DIR *fd_dir = opendir(fd_dir_path);
-
 		if (!fd_dir)
 			continue;
 
 		struct dirent *fd_entry;
-
 		while ((fd_entry = readdir(fd_dir)) != NULL) {
-			char fd_path[128];
+			char fd_path[PATH_MAX];
 			struct stat fd_stat;
 
-			snprintf(fd_path, sizeof(fd_path), "%s/%s",
-				 fd_dir_path, fd_entry->d_name);
+			if (fd_entry->d_name[0] == '.')
+				continue;
+
+			snprintf(fd_path, sizeof(fd_path), "%s/%s", fd_dir_path,
+				 fd_entry->d_name);
+			/*
+			 * st_rdev is the device; st_dev and st_ino name only one
+			 * directory entry of it, and so miss an fd opened through
+			 * by-path, through a bind mount, or before the node was
+			 * last recreated.
+			 */
 			if (stat(fd_path, &fd_stat) == 0 &&
-			    fd_stat.st_dev == target_stat->st_dev &&
-			    fd_stat.st_ino == target_stat->st_ino) {
+			    S_ISCHR(fd_stat.st_mode) &&
+			    fd_stat.st_rdev == rdev) {
 				pids[count++] = pid;
 				break;
 			}
@@ -119,275 +194,352 @@ static bool process_exists(pid_t pid)
 }
 
 /**
+ * @brief Check if a process still has threads (via /proc/<pid>)
+ * @param pid - process ID to check
+ * @return true if /proc/<pid> still exists
+ */
+static bool process_has_threads(pid_t pid)
+{
+	char path[64];
+
+	snprintf(path, sizeof(path), "/proc/%d", pid);
+	return access(path, F_OK) == 0;
+}
+
+/**
+ * @brief Check whether a process we found earlier has exited
+ * @param u - the process, holding a pidfd where one could be opened
+ * @return true once it is gone
+ */
+static bool dri_user_gone(const struct dri_user *u)
+{
+	struct pollfd pfd = { .fd = u->fd, .events = POLLIN };
+
+	if (u->fd < 0)
+		return !process_exists(u->pid);
+
+	return poll(&pfd, 1, 0) > 0;
+}
+
+/**
  * @brief Wait for a list of processes to terminate
- * @param pids - array of PIDs
- * @param count - number of PIDs
+ * @param users - array of processes
+ * @param count - number of entries in users
  * @param timeout_ms - maximum time to wait in milliseconds
  * @return number of processes still running after timeout
  */
-static int wait_for_processes(pid_t *pids, int count, int timeout_ms)
+static int wait_for_dri_users(struct dri_user *users, int count, int timeout_ms)
 {
 	const int poll_interval_ms = 50;
 	int elapsed = 0;
+	int remaining;
 
-	while (elapsed < timeout_ms) {
-		int still_running = 0;
-
+	for (;;) {
+		remaining = 0;
 		for (int i = 0; i < count; i++) {
-			if (pids[i] > 0 && process_exists(pids[i]))
-				still_running++;
+			if (!dri_user_gone(&users[i]))
+				remaining++;
 		}
-		if (still_running == 0)
-			return 0;
+		if (remaining == 0 || elapsed >= timeout_ms)
+			return remaining;
 
 		usleep(poll_interval_ms * 1000);
 		elapsed += poll_interval_ms;
 	}
-
-	/* Count remaining processes */
-	int remaining = 0;
-
-	for (int i = 0; i < count; i++) {
-		if (pids[i] > 0 && process_exists(pids[i]))
-			remaining++;
-	}
-	return remaining;
 }
 
 /**
- * @brief Answer the virtqueue while DRI clients go away
- * @param dev - gpu device whose queues are drained
- * @param pids - processes that were signalled, may be NULL
- * @param count - number of entries in pids
- * @param node - stat of the DRM node to rescan for holders, may be NULL
- * @param max_wait_ms - upper bound on the whole wait
+ * @brief List every DRM node of a card, the card node first
  *
- * A client that is blocked in a virtio-gpu ioctl cannot act on a signal until
- * its request is answered, and its kernel-side DRM cleanup produces further
- * requests. Stopping the queue before that settles leaves both sides waiting
- * on each other, so keep draining until the clients are gone and the queue has
- * been idle for a while. Processes that outlast the grace period are killed,
- * because the drain that wakes their ioctl is what lets the signal land.
+ * Reads the minors the kernel itself lists under the device. This is sysfs,
+ * not udev, so it needs no daemon and no libudev; and it is keyed on the
+ * device number rather than the card name, so a renamed or renumbered node
+ * does not throw it off. There is deliberately no fallback that derives the
+ * render minor from the card minor: those two numbering spaces are unrelated,
+ * and on a machine whose first free card minor is 0 the arithmetic lands on
+ * renderD128, which belongs to whichever GPU came up first.
+ *
+ * @param card_num - DRM card number
+ * @param nodes - output array (caller provides)
+ * @param max_nodes - size of nodes array
+ * @return number of nodes found, 0 if the card is already gone
  */
-static void drain_during_dri_cleanup(struct gpu_device *dev, pid_t *pids,
-				     int count, const struct stat *node,
-				     int max_wait_ms)
+static int find_drm_nodes(int card_num, struct drm_node *nodes, int max_nodes)
 {
-	const int interval_ms = 10;
-	const int stable_required = 50; /* 500ms idle = done */
-	const int idle_before_kill_ms = 3000;
-	const int kill_deadline_ms = 5000;
-	const int node_scan_interval = 100; /* 1s between /proc walks */
-	int elapsed_ms = 0;
-	int stable_count = 0;
-	int idle_ms = 0;
-	int total_drained = 0;
-	int loops_since_scan = node_scan_interval;
-	bool node_users_present = false;
-	bool sigkill_sent = false;
+	char sys_path[128];
+	struct stat st;
+	DIR *dp;
+	struct dirent *de;
+	int count;
 
-	while (elapsed_ms < max_wait_ms) {
-		int flushed = gpu_device_drain_once(dev);
-		bool any_alive = false;
+	if (card_num < 0 || max_nodes < 1)
+		return 0;
 
-		total_drained += flushed;
+	snprintf(nodes[0].path, sizeof(nodes[0].path), "/dev/dri/card%d",
+		 card_num);
+	if (stat(nodes[0].path, &st) < 0 || !S_ISCHR(st.st_mode))
+		return 0;
 
-		for (int i = 0; i < count; i++) {
-			if (pids[i] > 0 && process_exists(pids[i])) {
-				any_alive = true;
-				break;
-			}
-		}
+	nodes[0].rdev = st.st_rdev;
+	count = 1;
 
-		/*
-		 * The signalled processes are not the whole story: anything
-		 * else holding the node keeps the removal blocked too. The
-		 * /proc walk is expensive, so only redo it once a second.
-		 */
-		if (!any_alive && node != NULL) {
-			if (++loops_since_scan >= node_scan_interval) {
-				pid_t others[64];
+	snprintf(sys_path, sizeof(sys_path), "/sys/dev/char/%u:%u/device/drm",
+		 major(st.st_rdev), minor(st.st_rdev));
+	dp = opendir(sys_path);
+	if (!dp)
+		return count;
 
-				loops_since_scan = 0;
-				node_users_present =
-					find_dri_user_pids(node, getpid(), others,
-							   64) > 0;
-			}
-			if (node_users_present)
-				any_alive = true;
-		}
+	while ((de = readdir(dp)) != NULL && count < max_nodes) {
+		struct stat node_st;
 
-		if (!sigkill_sent && count > 0 && any_alive &&
-		    (idle_ms >= idle_before_kill_ms ||
-		     elapsed_ms >= kill_deadline_ms)) {
-			warnx("Escalating to SIGKILL (elapsed=%dms idle=%dms)",
-			      elapsed_ms, idle_ms);
-			for (int i = 0; i < count; i++) {
-				if (pids[i] > 0 && process_exists(pids[i])) {
-					warnx("  Sending SIGKILL to PID %d",
-					      pids[i]);
-					kill(pids[i], SIGKILL);
-				}
-			}
-			sigkill_sent = true;
-			idle_ms = 0;
-		}
-
-		if (flushed > 0) {
-			idle_ms = 0;
-			stable_count = 0;
-		} else if (any_alive) {
-			idle_ms += interval_ms;
-			stable_count = 0;
-		} else if (++stable_count >= stable_required) {
-			break;
-		}
-
-		usleep(interval_ms * 1000);
-		elapsed_ms += interval_ms;
-	}
-
-	if (total_drained > 0)
-		warnx("Drained %d requests during DRI cleanup", total_drained);
-	if (elapsed_ms >= max_wait_ms)
-		warnx("DRI cleanup drain timed out after %dms", max_wait_ms);
-}
-
-/**
- * @brief Find DRM card device node by vendor_id and terminate processes using it
- * @param dev - gpu device, drained while the clients shut down
- * @param vendor_id - the vendor_id used when creating the virtio-lo device
- */
-static void terminate_dri_users(struct gpu_device *dev, uint32_t vendor_id)
-{
-	struct udev *udev;
-	struct udev_enumerate *enumerate;
-	struct udev_list_entry *devices, *dev_list_entry;
-	const char *target_devnode = NULL;
-	struct stat target_stat;
-	char vendor_str[16];
-	pid_t my_pid = getpid();
-	pid_t pids[64];
-	int count, remaining;
-	const int dri_grace_ms = 3000;
-	const int dri_cleanup_ms = 30000;
-
-	snprintf(vendor_str, sizeof(vendor_str), "0x%04x", vendor_id);
-
-	udev = udev_new();
-	if (!udev)
-		return;
-
-	enumerate = udev_enumerate_new(udev);
-	if (!enumerate) {
-		udev_unref(udev);
-		return;
-	}
-
-	udev_enumerate_add_match_subsystem(enumerate, "drm");
-	udev_enumerate_scan_devices(enumerate);
-	devices = udev_enumerate_get_list_entry(enumerate);
-
-	/* Find the DRM card with matching vendor_id */
-	udev_list_entry_foreach(dev_list_entry, devices) {
-		const char *path =
-			udev_list_entry_get_name(dev_list_entry);
-		struct udev_device *dev =
-			udev_device_new_from_syspath(udev, path);
-
-		if (!dev)
+		if (de->d_name[0] == '.')
 			continue;
 
-		const char *devnode = udev_device_get_devnode(dev);
+		snprintf(nodes[count].path, sizeof(nodes[count].path),
+			 "/dev/dri/%.31s", de->d_name);
+		if (stat(nodes[count].path, &node_st) < 0 ||
+		    !S_ISCHR(node_st.st_mode) ||
+		    node_st.st_rdev == nodes[0].rdev)
+			continue;
 
-		if (devnode && strstr(devnode, "/dev/dri/card")) {
-			struct udev_device *parent =
-				udev_device_get_parent(dev);
+		nodes[count].rdev = node_st.st_rdev;
+		count++;
+	}
+	closedir(dp);
 
-			if (parent) {
-				const char *vid =
-					udev_device_get_sysattr_value(
-						parent, "vendor");
-				if (vid &&
-				    strcmp(vid, vendor_str) == 0) {
-					target_devnode = strdup(devnode);
-					udev_device_unref(dev);
+	return count;
+}
+
+/**
+ * @brief Count DRI users across card and all render nodes
+ * @param card_num - DRM card number
+ * @return total number of external processes using any DRI node
+ */
+static int count_all_dri_users(int card_num)
+{
+	struct drm_node nodes[8];
+	pid_t pids[64];
+	pid_t my_pid = getpid();
+	int nnodes = find_drm_nodes(card_num, nodes, (int)ARRAY_SIZE(nodes));
+	int total = 0;
+
+	for (int i = 0; i < nnodes; i++)
+		total += find_dri_user_pids(nodes[i].rdev, my_pid, pids,
+					    (int)ARRAY_SIZE(pids));
+
+	return total;
+}
+
+/**
+ * @brief Find DRM card number matching the given vendor_id via DEVPATH
+ * @param vendor_id - vendor_id used when creating the virtio-lo device
+ * @return card number (>= 0) on success, -1 if not found
+ */
+static int find_drm_card_by_vendor(uint32_t vendor_id)
+{
+	struct udev *ud;
+	struct udev_enumerate *en;
+	struct udev_list_entry *devs, *e;
+	int card = -1;
+
+	ud = udev_new();
+	if (!ud)
+		return -1;
+
+	en = udev_enumerate_new(ud);
+	if (!en) {
+		udev_unref(ud);
+		return -1;
+	}
+
+	udev_enumerate_add_match_subsystem(en, "drm");
+	udev_enumerate_scan_devices(en);
+	devs = udev_enumerate_get_list_entry(en);
+
+	udev_list_entry_foreach(e, devs) {
+		const char *sp = udev_list_entry_get_name(e);
+		struct udev_device *d =
+			udev_device_new_from_syspath(ud, sp);
+		if (!d)
+			continue;
+
+		const char *dn = udev_device_get_devnode(d);
+		const char *seat = udev_device_get_property_value(
+			d, "ID_SEAT");
+		const char *devpath = udev_device_get_property_value(
+			d, "DEVPATH");
+
+		if (dn && strstr(dn, "/dev/dri/card") && seat &&
+		    strcmp(seat, "seat_virtual") == 0 && devpath) {
+			unsigned int dp_vid;
+
+			if (get_virtio_suffix_hex(devpath, &dp_vid) == 0 &&
+			    dp_vid == vendor_id) {
+				const char *cn = strstr(dn, "card");
+
+				if (cn)
+					card = atoi(cn + 4);
+			}
+		}
+		udev_device_unref(d);
+		if (card >= 0)
+			break;
+	}
+
+	udev_enumerate_unref(en);
+	udev_unref(ud);
+	return card;
+}
+
+/**
+ * @brief Wait for DRM card node to appear while processing virtqueue
+ * @param dev - gpu device
+ * @param epoll_fd - epoll file descriptor for virtqueue events
+ *
+ * The kernel virtio-gpu driver probes asynchronously and needs
+ * virtqueue responses before creating /dev/dri/ nodes.
+ * @return card number (>= 0) on success, -1 on timeout
+ */
+static int wait_for_drm_card(struct gpu_device *dev, int epoll_fd)
+{
+	uint32_t vid = gpu_device_get_vendor_id(dev);
+	const int max_wait_ms = 15000;
+	struct timespec ts_start, ts_now;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+
+	for (;;) {
+		struct epoll_event events[8];
+		int n = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), 100);
+
+		for (int i = 0; i < n; i++) {
+			if (events[i].data.u32 == PROXY_GPU_QUEUES)
+				gpu_device_serve(dev);
+		}
+
+		int card = find_drm_card_by_vendor(vid);
+
+		if (card >= 0)
+			return card;
+
+		clock_gettime(CLOCK_MONOTONIC, &ts_now);
+		int elapsed_ms =
+			(int)((ts_now.tv_sec - ts_start.tv_sec) * 1000 +
+			      (ts_now.tv_nsec - ts_start.tv_nsec) / 1000000);
+		if (elapsed_ms >= max_wait_ms) {
+			warnx("udev: DRM device not found (timeout %dms,"
+			      " vendor_id=0x%04x)", max_wait_ms, vid);
+			return -1;
+		}
+	}
+}
+
+/**
+ * @brief Ask the processes still holding our DRM card to let go of it
+ * @param card_num - DRM card number (e.g. 2 for /dev/dri/card2)
+ * @param out_pids - array to store signalled PIDs (caller provides)
+ * @param max_pids - size of out_pids array
+ * @return number of PIDs signalled (0 if none)
+ */
+static int terminate_dri_users(int card_num, pid_t *out_pids, int max_pids)
+{
+	struct drm_node nodes[8];
+	struct dri_user users[64];
+	pid_t my_pid = getpid();
+	int nnodes, count = 0, remaining, out_count;
+	const int sigterm_timeout_ms = 5000;
+
+	if (card_num < 0) {
+		warnx("DRM card number unknown, skipping DRI cleanup");
+		return 0;
+	}
+
+	nnodes = find_drm_nodes(card_num, nodes, (int)ARRAY_SIZE(nodes));
+	if (nnodes == 0) {
+		warnx("DRI device for card%d not found", card_num);
+		return 0;
+	}
+
+	for (int ni = 0; ni < nnodes && count < (int)ARRAY_SIZE(users); ni++) {
+		pid_t npids[64];
+		int n = find_dri_user_pids(nodes[ni].rdev, my_pid, npids,
+					   (int)ARRAY_SIZE(npids));
+
+		if (n == (int)ARRAY_SIZE(npids))
+			warnx("More than %d users of %s, ignoring the rest",
+			      n, nodes[ni].path);
+
+		for (int j = 0; j < n && count < (int)ARRAY_SIZE(users); j++) {
+			bool dup = false;
+
+			for (int k = 0; k < count; k++) {
+				if (users[k].pid == npids[j]) {
+					dup = true;
 					break;
 				}
 			}
+			if (dup)
+				continue;
+
+			users[count].pid = npids[j];
+			/*
+			 * Taken now, while this pid is still known to be the
+			 * process we found, so that one recycled before the
+			 * signal goes out cannot be hit in its place.
+			 */
+			users[count].fd = pidfd_open_compat(npids[j]);
+			read_proc_cmdline(npids[j], users[count].cmd,
+					  sizeof(users[count].cmd));
+			warnx("  %s held by pid %d (%s)", nodes[ni].path,
+			      users[count].pid,
+			      users[count].cmd[0] ? users[count].cmd : "gone");
+			count++;
 		}
-		udev_device_unref(dev);
 	}
 
-	udev_enumerate_unref(enumerate);
-	udev_unref(udev);
+	if (count == 0)
+		return 0;
 
-	if (!target_devnode) {
-		warnx("DRI device with vendor_id %s not found", vendor_str);
-		/*
-		 * Nothing to signal, but the removal that follows still blocks
-		 * on clients we failed to identify, so keep answering them.
-		 */
-		drain_during_dri_cleanup(dev, NULL, 0, NULL, dri_grace_ms);
-		return;
-	}
-
-	warnx("Found DRI device: %s (vendor_id=%s)", target_devnode,
-	      vendor_str);
-
-	if (stat(target_devnode, &target_stat) < 0) {
-		free((void *)target_devnode);
-		return;
-	}
-
-	/*
-	 * Give the clients a chance to leave on their own first. Draining is
-	 * what unblocks the ioctls they are sleeping in, and one that is
-	 * already shutting down closes the device once it wakes, so only what
-	 * still holds it after this is signalled.
-	 */
-	drain_during_dri_cleanup(dev, NULL, 0, &target_stat, dri_grace_ms);
-
-	/* Find processes using the device */
-	count = find_dri_user_pids(&target_stat, my_pid, pids, 64);
-	if (count == 0) {
-		warnx("No processes using %s", target_devnode);
-		goto wait_kernel_cleanup;
-	}
-
-	warnx("Found %d process(es) using %s, sending SIGTERM...", count,
-	      target_devnode);
-
-	/* Send SIGTERM to all processes */
+	warnx("Asking %d process(es) to release card%d...", count, card_num);
 	for (int i = 0; i < count; i++) {
-		warnx("  Sending SIGTERM to PID %d", pids[i]);
-		kill(pids[i], SIGTERM);
+		if (users[i].fd < 0 ||
+		    pidfd_signal_compat(users[i].fd, SIGTERM) < 0)
+			kill(users[i].pid, SIGTERM);
 	}
 
-	/*
-	 * Keep answering the queue while they leave. This both unblocks the
-	 * ioctls they are sleeping in and absorbs the requests their DRM
-	 * cleanup generates; SIGKILL is escalated from inside the drain.
-	 */
-	drain_during_dri_cleanup(dev, pids, count, &target_stat, dri_cleanup_ms);
-
-	remaining = wait_for_processes(pids, count, 0);
-	if (remaining > 0)
-		warnx("Warning: %d process(es) still running after cleanup",
-		      remaining);
+	remaining = wait_for_dri_users(users, count, sigterm_timeout_ms);
+	if (remaining == 0)
+		warnx("All DRI users released the device");
 	else
-		warnx("All DRI users terminated");
+		/*
+		 * Killing here costs more than it saves: the client dies
+		 * before its virtio-gpu commands are answered and the driver
+		 * then loses those vbufs ("Slab cache still has objects" when
+		 * the device goes away). The drain below both wakes the client
+		 * and escalates once it is clear nothing is moving.
+		 */
+		warnx("%d process(es) still hold the device, leaving it to the drain",
+		      remaining);
 
-wait_kernel_cleanup:
+	for (int i = 0; i < count; i++) {
+		if (users[i].fd >= 0)
+			close(users[i].fd);
+	}
+
 	/*
 	 * Wait for kernel to release DRM resources (GEM objects, etc.)
 	 * Even after userspace processes terminate, the kernel needs time
 	 * to clean up virtio-gpu-vbufs and other internal resources.
+	 * The cleanup involves:
+	 *   1. Closing file descriptors triggers drm_release()
+	 *   2. drm_release() schedules GEM object destruction
+	 *   3. virtio-gpu driver frees command buffers
+	 *   4. Memory manager cleans up allocations
 	 *
 	 * Open the DRM device briefly to trigger any pending cleanup.
 	 */
 	{
-		int drm_fd = open(target_devnode, O_RDWR | O_CLOEXEC);
+		int drm_fd = open(nodes[0].path, O_RDWR | O_CLOEXEC);
 
 		if (drm_fd >= 0) {
 			/* Opening and closing DRM device triggers cleanup */
@@ -397,7 +549,158 @@ wait_kernel_cleanup:
 		}
 	}
 
-	free((void *)target_devnode);
+	/*
+	 * Note: No fixed sleep needed here. gpu_device_flush_pending()
+	 * will poll until no new virtqueue requests arrive, which
+	 * naturally waits for kernel DRM cleanup to complete.
+	 */
+
+	out_count = count < max_pids ? count : max_pids;
+	for (int i = 0; i < out_count; i++)
+		out_pids[i] = users[i].pid;
+	return out_count;
+}
+
+/**
+ * @brief Drain virtqueue while DRM cleanup proceeds
+ *
+ * When a DRI client (e.g., crosvm) is killed, its kernel-side DRM cleanup
+ * (drm_release -> drm_gem_release -> virtio_gpu_gem_object_close ->
+ * virtio_gpu_queue_ctrl_sgs) generates new virtqueue commands. If we stop
+ * processing these commands before cleanup completes, both crosvm and
+ * rvgpu-proxy enter unrecoverable D state:
+ *
+ *   crosvm:      virtio_gpu_queue_ctrl_sgs (virtqueue full, no consumer)
+ *   rvgpu-proxy: synchronize_srcu via drm_dev_unplug (DRM readers remain)
+ *
+ * This function keeps draining the virtqueue until:
+ *   1. All known killed PIDs have fully exited (/proc/<pid> gone)
+ *   2. No external process has our DRM device open
+ *   3. Virtqueue is idle for a stability period (500ms)
+ *
+ * The devnode scan (expensive) is throttled to once per second.
+ */
+static void drain_during_dri_cleanup(struct gpu_device *dev,
+				     pid_t *killed_pids, int nkilled,
+				     int card_num, int max_wait_ms)
+{
+	char devnode[32];
+	const int interval_ms = 10;
+	const int stable_required = 50;        /* 500ms idle = done */
+	const int devnode_scan_interval = 100;  /* 1s between /proc scans */
+	const int progress_interval_ms = 5000;
+	/*
+	 * If drain has been idle for this long while killed_pids are still
+	 * alive, the SIGTERM'd client is stuck (kernel D state or blocked in
+	 * a compositor round-trip). Escalate to SIGKILL: the pending drain
+	 * will wake the stuck ioctl, at which point the queued SIGKILL kills
+	 * the process instantly, bypassing any userspace cleanup that would
+	 * block again. Chosen to be longer than the worst-case time a normal
+	 * app (or crosvm guest) needs to start emitting drm_release traffic.
+	 */
+	const int idle_before_kill_ms = 3000;
+	/*
+	 * A client that keeps rendering never lets the idle timer above fire,
+	 * yet it is exactly the client that must be gone before the device is
+	 * removed: anything it submits afterwards is a virtio-gpu vbuf the
+	 * kernel can no longer reclaim ("Objects remaining in virtio-gpu-vbufs"
+	 * on cache shutdown). Bound the wait so a busy client is killed too.
+	 */
+	const int kill_deadline_ms = 5000;
+	int elapsed_ms = 0;
+	int stable_count = 0;
+	int idle_since_activity_ms = 0;
+	int total_drained = 0;
+	int last_progress_ms = 0;
+	int loops_since_scan = devnode_scan_interval; /* scan on first pass */
+	bool external_users_present = false;
+	bool sigkill_sent = false;
+
+	if (card_num >= 0)
+		snprintf(devnode, sizeof(devnode), "/dev/dri/card%d",
+			 card_num);
+
+	warnx("Draining virtqueue during DRM cleanup (killed=%d)...",
+	      nkilled);
+
+	while (elapsed_ms < max_wait_ms) {
+		int flushed = gpu_device_drain_once(dev);
+
+		total_drained += flushed;
+
+		/* Lightweight check: are killed processes still in kernel? */
+		bool any_alive = false;
+
+		for (int i = 0; i < nkilled; i++) {
+			if (killed_pids[i] > 0 &&
+			    process_has_threads(killed_pids[i])) {
+				any_alive = true;
+				break;
+			}
+		}
+
+		/* Heavyweight check: any external DRM users? (throttled) */
+		if (!any_alive && card_num >= 0) {
+			loops_since_scan++;
+			if (loops_since_scan >= devnode_scan_interval) {
+				loops_since_scan = 0;
+				external_users_present =
+					count_all_dri_users(card_num) > 0;
+			}
+			if (external_users_present)
+				any_alive = true;
+		}
+
+		if (!sigkill_sent && nkilled > 0 &&
+		    (idle_since_activity_ms >= idle_before_kill_ms ||
+		     elapsed_ms >= kill_deadline_ms)) {
+			warnx("Escalating to SIGKILL (elapsed=%dms idle=%dms)",
+			      elapsed_ms, idle_since_activity_ms);
+			for (int i = 0; i < nkilled; i++) {
+				if (killed_pids[i] > 0 &&
+				    process_has_threads(killed_pids[i])) {
+					warnx("  SIGKILL pid %d",
+					      killed_pids[i]);
+					kill(killed_pids[i], SIGKILL);
+				}
+			}
+			sigkill_sent = true;
+			/* give drm_release time to emit its cleanup */
+			idle_since_activity_ms = 0;
+		}
+
+		if (flushed > 0) {
+			idle_since_activity_ms = 0;
+			stable_count = 0;
+		} else if (any_alive) {
+			idle_since_activity_ms += interval_ms;
+			stable_count = 0;
+		} else {
+			stable_count++;
+			if (stable_count >= stable_required)
+				break;
+		}
+
+		if (elapsed_ms - last_progress_ms >= progress_interval_ms) {
+			warnx("  Still draining: %dms elapsed, %d drained, "
+			      "processes_alive=%s",
+			      elapsed_ms, total_drained,
+			      any_alive ? "yes" : "no");
+			last_progress_ms = elapsed_ms;
+		}
+
+		usleep(interval_ms * 1000);
+		elapsed_ms += interval_ms;
+	}
+
+	if (total_drained > 0)
+		warnx("Drained %d requests during DRI cleanup", total_drained);
+
+	if (elapsed_ms >= max_wait_ms)
+		warnx("drain_during_dri_cleanup: timeout after %dms",
+		      max_wait_ms);
+	else
+		warnx("DRI cleanup drain complete in %dms", elapsed_ms);
 }
 
 static void usage(void)
@@ -571,7 +874,8 @@ int main(int argc, char **argv)
 	}
 
 	rvgpu_be = init_backend_rvgpu(&servers);
-	assert(rvgpu_be);
+	if (rvgpu_be == NULL)
+		errx(1, "failed to init rvgpu backend");
 
 	lo_fd = open(VIRTIO_LO_PATH, O_RDWR);
 	if (lo_fd == -1)
@@ -593,9 +897,31 @@ int main(int argc, char **argv)
 		fclose(oomFile);
 	}
 
+	/*
+	 * Serialize vendor_id assignment across proxy instances.
+	 * next_drm_card_mex() (called inside gpu_device_init) scans
+	 * existing virtual DRM cards to pick the next vendor_id.
+	 * Without a lock, simultaneous proxies all see 0 cards and
+	 * pick the same vendor_id, making find_drm_card_by_vendor()
+	 * return the same card for all of them.  Hold the lock until
+	 * wait_for_drm_card() confirms our card is visible in udev.
+	 */
+#define VENDOR_LOCK_PATH "/tmp/.rvgpu-vendor-lock"
+	int vendor_lock_fd = open(VENDOR_LOCK_PATH,
+				  O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+	if (vendor_lock_fd < 0)
+		err(1, "open %s", VENDOR_LOCK_PATH);
+	if (flock(vendor_lock_fd, LOCK_EX) < 0)
+		err(1, "flock %s", VENDOR_LOCK_PATH);
+
 	dev = gpu_device_init(lo_fd, epoll_fd, capset, &params, rvgpu_be);
 	if (!dev)
 		err(1, "gpu device init");
+
+	int drm_card_num = wait_for_drm_card(dev, epoll_fd);
+
+	flock(vendor_lock_fd, LOCK_UN);
+	close(vendor_lock_fd);
 
 	inpdev = input_device_init(rvgpu_be);
 	if (!inpdev)
@@ -651,8 +977,60 @@ int main(int argc, char **argv)
 
 	warnx("Shutdown requested, cleaning up...");
 
-	/* Terminate processes using our DRI device before freeing it */
-	terminate_dri_users(dev, gpu_device_get_vendor_id(dev));
+	/*
+	 * Brief drain before killing DRI users.
+	 * Apps may be stuck in kernel virtio-gpu ioctls (D state)
+	 * waiting for virtqueue responses.  Draining a few requests
+	 * unblocks those ioctls so the apps can receive SIGTERM.
+	 */
+	{
+		int pre_drained = 0;
+
+		for (int i = 0; i < 50; i++) {
+			int n = gpu_device_drain_once(dev);
+
+			pre_drained += n;
+			if (n == 0)
+				break;
+		}
+		if (pre_drained > 0)
+			warnx("Pre-drain: flushed %d pending requests",
+			      pre_drained);
+	}
+
+	/*
+	 * Give the DRI users a chance to leave of their own accord before
+	 * asking them to. Draining is what unblocks the ioctls they are
+	 * sleeping in, and a client that is already shutting down closes the
+	 * device once it wakes. Only what is still holding it after the grace
+	 * period is signalled, so a process that merely opened the node in
+	 * passing is never disturbed.
+	 *
+	 * The drain also runs when our card was never found: the device
+	 * removal still blocks on clients we failed to identify.
+	 */
+	{
+		pid_t killed_pids[64];
+		int nkilled = 0;
+		const int dri_grace_ms = 3000;
+		const int dri_cleanup_ms = 30000;
+
+		drain_during_dri_cleanup(dev, NULL, 0, drm_card_num,
+					 dri_grace_ms);
+
+		if (count_all_dri_users(drm_card_num) > 0)
+			nkilled = terminate_dri_users(drm_card_num, killed_pids,
+						      64);
+
+		/*
+		 * Drain virtqueue while DRM cleanup proceeds.
+		 * Always runs regardless of nkilled: crosvm may have been
+		 * killed externally before our shutdown, and its kernel DRM
+		 * cleanup threads may still be generating virtqueue commands.
+		 */
+		drain_during_dri_cleanup(dev, killed_pids, nkilled,
+					 drm_card_num, dri_cleanup_ms);
+	}
 
 	/*
 	 * Flush pending virtqueue requests with error responses.

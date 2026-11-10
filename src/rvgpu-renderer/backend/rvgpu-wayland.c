@@ -650,8 +650,8 @@ void rvgpu_wl_create_window(struct rvgpu_egl_state *e, uint32_t width,
 				struct wl_region *region =
 					wl_compositor_create_region(r->comp);
 				assert(region);
-				wl_region_add(region, 0, 0, *(r->width),
-					      *(r->height));
+				wl_region_add(region, 0, 0, INT32_MAX,
+					      INT32_MAX);
 				wl_surface_set_opaque_region(native->surface,
 							     region);
 				wl_region_destroy(region);
@@ -683,7 +683,8 @@ void rvgpu_wl_create_window(struct rvgpu_egl_state *e, uint32_t width,
 				struct wl_region *region =
 					wl_compositor_create_region(r->comp);
 				assert(region);
-				wl_region_add(region, 0, 0, width, height);
+				wl_region_add(region, 0, 0, INT32_MAX,
+					      INT32_MAX);
 				wl_surface_set_opaque_region(native->surface,
 							     region);
 				wl_region_destroy(region);
@@ -778,15 +779,29 @@ void *rvgpu_wl_init(void *params, uint32_t *width, uint32_t *height)
 
 	/* Wayland initialization */
 	r->dpy = create_wl_native_display(NULL);
-	assert(r->dpy);
+	if (!r->dpy) {
+		free(r);
+		return NULL;
+	}
 
+	/* assert() is compiled out in release builds, so check explicitly */
 	r->reg = wl_display_get_registry(r->dpy);
-	assert(r->reg);
+	if (!r->reg) {
+		fprintf(stderr, "Failed to get Wayland registry\n");
+		wl_display_disconnect(r->dpy);
+		free(r);
+		return NULL;
+	}
 
 	wl_registry_add_listener(r->reg, &registry_listener, r);
 	res = wl_display_roundtrip(r->dpy);
-	assert(res != -1);
-	(void)res;
+	if (res == -1) {
+		fprintf(stderr, "Failed to get Wayland globals\n");
+		wl_registry_destroy(r->reg);
+		wl_display_disconnect(r->dpy);
+		free(r);
+		return NULL;
+	}
 
 	/* EGL initialization */
 	if (rvgpu_get_platform_display) {
@@ -802,8 +817,21 @@ void *rvgpu_wl_init(void *params, uint32_t *width, uint32_t *height)
 
 	rvgpu_egl_init_context(&r->egl);
 
+	/*
+	 * Create the window and complete the initial xdg configure
+	 * handshake (wl_display_roundtrip) BEFORE starting the event_loop
+	 * thread. event_loop uses wl_display_prepare_read/read_events while
+	 * rvgpu_wl_create_window uses wl_display_roundtrip; libwayland does
+	 * not allow mixing these two dispatch styles concurrently on the
+	 * same wl_display from different threads. Doing so races on the
+	 * configure event and intermittently leaves the surface unmapped
+	 * (no first buffer commit -> no window). Running create_window
+	 * single-threaded first guarantees the window is configured and
+	 * mapped, then the concurrent event loop can safely take over.
+	 */
+	rvgpu_wl_create_window(&r->egl, *width, *height, ivi_surface_id);
+
 	pthread_create(&wl_event_thread, NULL, event_loop, r);
 
-	rvgpu_wl_create_window(&r->egl, *width, *height, ivi_surface_id);
 	return &r->egl;
 }
